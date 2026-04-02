@@ -15,15 +15,18 @@ class RoomHostService {
   final DiscoveryService _discovery = DiscoveryService();
 
   String? _roomId;
+  String? _roomName;
   String? _hostName;
   int? _port;
 
   String? get activeRoomId => _roomId;
+  String? get activeRoomName => _roomName;
 
   bool get isRunning => _server != null;
 
   Future<void> start({
     required String roomId,
+    required String roomName,
     required String hostName,
     int port = 8080,
   }) async {
@@ -32,7 +35,7 @@ class RoomHostService {
     }
 
     if (_server != null) {
-      if (_roomId == roomId) {
+      if (_roomId == roomId && _roomName == roomName) {
         return;
       }
       await stop();
@@ -41,6 +44,7 @@ class RoomHostService {
     final server = await io.HttpServer.bind(io.InternetAddress.anyIPv4, port);
     await _discovery.startHostAdvertiser(
       roomId: roomId,
+      roomName: roomName,
       wsPort: server.port,
       hostName: hostName,
     );
@@ -80,6 +84,7 @@ class RoomHostService {
 
     _server = server;
     _roomId = roomId;
+    _roomName = roomName;
     _hostName = hostName;
     _port = server.port;
   }
@@ -100,6 +105,7 @@ class RoomHostService {
 
     _server = null;
     _roomId = null;
+    _roomName = null;
     _hostName = null;
     _port = null;
   }

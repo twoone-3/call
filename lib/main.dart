@@ -11,10 +11,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final baseTheme = ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-    );
-
+    final baseTheme = ThemeData();
     final isWindows = defaultTargetPlatform == TargetPlatform.windows;
     final textTheme = baseTheme.textTheme.apply(
       fontFamily: isWindows ? 'Microsoft YaHei UI' : null,

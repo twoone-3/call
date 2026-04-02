@@ -11,11 +11,11 @@ import 'package:flutter_test/flutter_test.dart';
 import '../lib/main.dart';
 
 void main() {
-  testWidgets('VibeChat main screen renders', (WidgetTester tester) async {
+  testWidgets('LAN Chat main screen renders', (WidgetTester tester) async {
     await tester.pumpWidget(const MyApp());
     await tester.pump();
 
-    expect(find.text('VibeChat'), findsOneWidget);
+    expect(find.text('LAN Chat'), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 }

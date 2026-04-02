@@ -4,12 +4,14 @@ import 'dart:io';
 
 class DiscoveredRoom {
   final String roomId;
+  final String roomName;
   final String hostIp;
   final int wsPort;
   final String hostName;
 
   const DiscoveredRoom({
     required this.roomId,
+    required this.roomName,
     required this.hostIp,
     required this.wsPort,
     required this.hostName,
@@ -29,6 +31,7 @@ class DiscoveryService {
 
   Future<void> startHostAdvertiser({
     required String roomId,
+    required String roomName,
     required int wsPort,
     required String hostName,
   }) async {
@@ -53,6 +56,7 @@ class DiscoveryService {
         final resp = jsonEncode({
           'type': _announceType,
           'roomId': roomId,
+          'roomName': roomName,
           'wsPort': wsPort,
           'hostName': hostName,
         });
@@ -116,12 +120,14 @@ class DiscoveryService {
         if (obj['type'] != _announceType) return;
 
         final roomId = (obj['roomId'] as String? ?? '').trim();
+        final roomName = (obj['roomName'] as String? ?? '').trim();
         final port = (obj['wsPort'] as num?)?.toInt() ?? 0;
         final hostName = (obj['hostName'] as String? ?? 'host').trim();
         if (roomId.isEmpty || port <= 0) return;
 
         final room = DiscoveredRoom(
           roomId: roomId,
+          roomName: roomName.isEmpty ? roomId : roomName,
           hostIp: dg.address.address,
           wsPort: port,
           hostName: hostName.isEmpty ? 'host' : hostName,

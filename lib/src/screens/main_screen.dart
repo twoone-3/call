@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../services/discovery.dart';
 import '../services/room_host_service.dart';
 import 'chat_room.dart';
+import 'settings_screen.dart';
 
 const _defaultServerUrl = 'ws://0.0.0.0:8080';
 const _prefsUsernameKey = 'main.username';
@@ -51,6 +52,30 @@ class SavedRoomEntry {
   };
 }
 
+class _RoomListItem {
+  final String id;
+  final String roomName;
+  final String roomId;
+  final String serverUrl;
+  final String hostName;
+  final bool isMine;
+  final bool isRunning;
+  final DateTime? createdAt;
+  final bool isDiscovered;
+
+  const _RoomListItem({
+    required this.id,
+    required this.roomName,
+    required this.roomId,
+    required this.serverUrl,
+    required this.hostName,
+    required this.isMine,
+    required this.isRunning,
+    required this.createdAt,
+    required this.isDiscovered,
+  });
+}
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -59,10 +84,9 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  final _nameCtrl = TextEditingController(text: 'user');
-  final _roomNameCtrl = TextEditingController(text: '新房间');
   final _discovery = DiscoveryService();
   final _hostService = RoomHostService.instance;
+  String _username = 'user';
   bool _discovering = false;
   bool _loadingPrefs = true;
   List<DiscoveredRoom> _rooms = const [];
@@ -74,19 +98,11 @@ class _MainScreenState extends State<MainScreen> {
     unawaited(_loadState());
   }
 
-  @override
-  void dispose() {
-    _nameCtrl.dispose();
-    _roomNameCtrl.dispose();
-    super.dispose();
-  }
-
   Future<SharedPreferences> get _prefs async => SharedPreferences.getInstance();
 
   Future<void> _loadState() async {
     final prefs = await _prefs;
     final username = prefs.getString(_prefsUsernameKey);
-    final draftRoomName = prefs.getString(_prefsRoomNameKey);
     final rawRooms = prefs.getStringList(_prefsRoomsKey) ?? const [];
 
     final loadedRooms = <SavedRoomEntry>[];
@@ -102,10 +118,7 @@ class _MainScreenState extends State<MainScreen> {
 
     if (!mounted) return;
     setState(() {
-      _nameCtrl.text = username?.trim().isNotEmpty == true ? username! : 'user';
-      _roomNameCtrl.text = draftRoomName?.trim().isNotEmpty == true
-          ? draftRoomName!
-          : '新房间';
+      _username = username?.trim().isNotEmpty == true ? username! : 'user';
       _savedRooms = loadedRooms;
       _loadingPrefs = false;
     });
@@ -118,11 +131,6 @@ class _MainScreenState extends State<MainScreen> {
     await prefs.setString(_prefsUsernameKey, value);
   }
 
-  Future<void> _saveRoomNameDraft(String value) async {
-    final prefs = await _prefs;
-    await prefs.setString(_prefsRoomNameKey, value);
-  }
-
   Future<void> _saveSavedRooms(List<SavedRoomEntry> rooms) async {
     final prefs = await _prefs;
     await prefs.setStringList(
@@ -131,11 +139,60 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  List<_RoomListItem> _buildMergedRooms() {
+    final discoveredByRoomId = <String, DiscoveredRoom>{
+      for (final room in _rooms) room.roomId: room,
+    };
+    final merged = <_RoomListItem>[];
+
+    for (final room in _savedRooms) {
+      final discovered = discoveredByRoomId.remove(room.roomId);
+      merged.add(
+        _RoomListItem(
+          id: room.id,
+          roomName: room.roomName,
+          roomId: room.roomId,
+          serverUrl: room.serverUrl,
+          hostName: _username,
+          isMine: true,
+          isRunning: _hostService.activeRoomId == room.roomId,
+          createdAt: room.createdAt,
+          isDiscovered: discovered != null,
+        ),
+      );
+    }
+
+    for (final room in discoveredByRoomId.values) {
+      merged.add(
+        _RoomListItem(
+          id: room.dedupeKey,
+          roomName: room.roomName,
+          roomId: room.roomId,
+          serverUrl: room.serverUrl,
+          hostName: room.hostName,
+          isMine: false,
+          isRunning: false,
+          createdAt: null,
+          isDiscovered: true,
+        ),
+      );
+    }
+
+    merged.sort((a, b) {
+      if (a.isMine != b.isMine) return a.isMine ? -1 : 1;
+      if (a.isRunning != b.isRunning) return a.isRunning ? -1 : 1;
+      return a.roomName.compareTo(b.roomName);
+    });
+
+    return merged;
+  }
+
   Future<bool> _startHostRoom(SavedRoomEntry room) async {
     try {
       await _hostService.start(
         roomId: room.roomId,
-        hostName: _nameCtrl.text.trim(),
+        roomName: room.roomName,
+        hostName: _username,
       );
       if (mounted) {
         setState(() {});
@@ -152,7 +209,7 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  Future<void> _createRoom() async {
+  Future<void> _createRoom(String roomNameInput) async {
     if (kIsWeb) {
       await showDialog(
         context: context,
@@ -162,9 +219,9 @@ class _MainScreenState extends State<MainScreen> {
       return;
     }
 
-    final roomName = _roomNameCtrl.text.trim().isEmpty
+    final roomName = roomNameInput.trim().isEmpty
         ? '新房间'
-        : _roomNameCtrl.text.trim();
+        : roomNameInput.trim();
     final roomId = const Uuid().v4().substring(0, 8);
     final room = SavedRoomEntry(
       id: const Uuid().v4(),
@@ -177,28 +234,103 @@ class _MainScreenState extends State<MainScreen> {
     final started = await _startHostRoom(room);
     if (!started) return;
 
+    final prefs = await _prefs;
+    await prefs.setString(_prefsRoomNameKey, roomName);
+
     final updatedRooms = [room, ..._savedRooms.where((r) => r.id != room.id)];
     setState(() => _savedRooms = updatedRooms);
     await _saveSavedRooms(updatedRooms);
 
-    await showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('房间已创建'),
-        content: SelectableText('房间名称：$roomName\n房间ID：$roomId\n已保存到“我的房间”列表。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
-    );
-
     if (!mounted) return;
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('已创建房间：$roomName')));
 
     await _openHostRoom(room);
     if (mounted) _refreshRooms();
+  }
+
+  Future<void> _openCreateRoomPopup() async {
+    final prefs = await _prefs;
+    final initialRoomName =
+        prefs.getString(_prefsRoomNameKey)?.trim().isNotEmpty == true
+        ? prefs.getString(_prefsRoomNameKey)!.trim()
+        : '新房间';
+    final controller = TextEditingController(text: initialRoomName);
+
+    if (!mounted) return;
+
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 8,
+            bottom: MediaQuery.viewInsetsOf(sheetContext).bottom + 16,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '创建房间',
+                style: Theme.of(
+                  sheetContext,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                decoration: const InputDecoration(
+                  labelText: '房间名称',
+                  hintText: '例如：下午茶房间',
+                ),
+                onSubmitted: (_) =>
+                    Navigator.of(sheetContext).pop(controller.text),
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () =>
+                    Navigator.of(sheetContext).pop(controller.text),
+                icon: const Icon(Icons.add),
+                label: const Text('创建并开房'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    controller.dispose();
+    if (result == null) return;
+
+    if (!mounted) return;
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return;
+
+    await _createRoom(result);
+  }
+
+  Future<void> _openSettings() async {
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(initialUsername: _username),
+      ),
+    );
+
+    if (result == null) return;
+
+    final normalized = result.trim().isEmpty ? 'user' : result.trim();
+    setState(() => _username = normalized);
+    await _saveUsername(normalized);
   }
 
   Future<void> _openHostRoom(SavedRoomEntry room) async {
@@ -210,7 +342,8 @@ class _MainScreenState extends State<MainScreen> {
       MaterialPageRoute(
         builder: (_) => ChatRoomScreen(
           serverUrl: room.serverUrl,
-          name: _nameCtrl.text.trim(),
+          name: _username,
+          roomName: room.roomName,
           roomId: room.roomId,
           isHost: true,
         ),
@@ -225,7 +358,8 @@ class _MainScreenState extends State<MainScreen> {
       MaterialPageRoute(
         builder: (_) => ChatRoomScreen(
           serverUrl: room.serverUrl,
-          name: _nameCtrl.text.trim(),
+          name: _username,
+          roomName: room.roomName,
           roomId: room.roomId,
           isHost: false,
         ),
@@ -301,108 +435,110 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildMyRoomsSection() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _sectionHeader(title: '我的房间'),
-            const SizedBox(height: 12),
-            if (_savedRooms.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
-                child: Center(child: Text('还没有创建过房间')),
-              )
-            else
-              ..._savedRooms.map(
-                (room) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Card(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.surfaceContainerHighest,
-                    child: ListTile(
-                      leading: const Icon(Icons.home_work_outlined),
-                      title: Text(room.roomName),
-                      subtitle: Text(
-                        '房间ID: ${room.roomId}${_hostService.activeRoomId == room.roomId ? ' · 运行中' : ''}\n创建于: ${room.createdAt.toLocal().toString().split('.').first}',
-                      ),
-                      isThreeLine: true,
-                      trailing: Wrap(
-                        spacing: 8,
-                        children: [
-                          IconButton(
-                            tooltip: '重新开房',
-                            onPressed: () => _openHostRoom(room),
-                            icon: const Icon(Icons.play_arrow),
-                          ),
-                          IconButton(
-                            tooltip: '删除',
-                            onPressed: () => _confirmDeleteRoom(room),
-                            icon: const Icon(Icons.delete_outline),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget _buildRoomCard(_RoomListItem room) {
+    final isRunning = room.isRunning;
+    final badgeWidgets = <Widget>[];
 
-  Widget _buildLanRoomsSection() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _discovering ? '正在搜索局域网房间...' : '局域网房间 (${_rooms.length})',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: _discovering ? null : _refreshRooms,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('刷新'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (_rooms.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
-                child: Center(child: Text('未发现房间，点击“刷新”重试')),
-              )
-            else
-              ..._rooms.map(
-                (room) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.lan),
-                      title: Text('房间 ${room.roomId}'),
-                      subtitle: Text(
-                        '${room.hostName} · ${room.hostIp}:${room.wsPort}',
+    if (room.isMine) {
+      badgeWidgets.add(
+        const Padding(
+          padding: EdgeInsets.only(left: 8),
+          child: Chip(
+            visualDensity: VisualDensity.compact,
+            label: Text('我的房间'),
+          ),
+        ),
+      );
+    }
+
+    if (isRunning) {
+      badgeWidgets.add(
+        const Padding(
+          padding: EdgeInsets.only(left: 8),
+          child: Chip(visualDensity: VisualDensity.compact, label: Text('运行中')),
+        ),
+      );
+    }
+
+    if (room.isDiscovered && !room.isMine) {
+      badgeWidgets.add(
+        const Padding(
+          padding: EdgeInsets.only(left: 8),
+          child: Chip(visualDensity: VisualDensity.compact, label: Text('局域网')),
+        ),
+      );
+    }
+
+    final subtitle = room.isMine
+        ? '创建于: ${room.createdAt?.toLocal().toString().split('.').first ?? '-'}'
+        : '来自 ${room.hostName} 的局域网房间';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Card(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: ListTile(
+          leading: const Icon(Icons.home_work_outlined),
+          title: Row(
+            children: [
+              Expanded(child: Text(room.roomName)),
+              ...badgeWidgets,
+            ],
+          ),
+          subtitle: Text(subtitle),
+          isThreeLine: true,
+          trailing: Wrap(
+            spacing: 8,
+            children: [
+              IconButton(
+                tooltip: '进入',
+                onPressed: room.isMine
+                    ? () => _openHostRoom(
+                        SavedRoomEntry(
+                          id: room.id,
+                          roomName: room.roomName,
+                          roomId: room.roomId,
+                          serverUrl: room.serverUrl,
+                          createdAt: room.createdAt ?? DateTime.now(),
+                        ),
+                      )
+                    : () => _openDiscoveredRoom(
+                        DiscoveredRoom(
+                          roomId: room.roomId,
+                          roomName: room.roomName,
+                          hostIp: room.serverUrl
+                              .replaceFirst('ws://', '')
+                              .split(':')
+                              .first,
+                          wsPort:
+                              int.tryParse(
+                                room.serverUrl
+                                    .replaceFirst('ws://', '')
+                                    .split(':')
+                                    .last,
+                              ) ??
+                              8080,
+                          hostName: room.hostName,
+                        ),
                       ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => _openDiscoveredRoom(room),
+                icon: const Icon(Icons.chevron_right),
+              ),
+              if (room.isMine)
+                IconButton(
+                  tooltip: '删除',
+                  onPressed: () => _confirmDeleteRoom(
+                    SavedRoomEntry(
+                      id: room.id,
+                      roomName: room.roomName,
+                      roomId: room.roomId,
+                      serverUrl: room.serverUrl,
+                      createdAt: room.createdAt ?? DateTime.now(),
                     ),
                   ),
+                  icon: const Icon(Icons.delete_outline),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -410,8 +546,19 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final mergedRooms = _buildMergedRooms();
+
     return Scaffold(
-      appBar: AppBar(title: const Text('VibeChat')),
+      appBar: AppBar(
+        title: const Text('LAN Chat'),
+        actions: [
+          IconButton(
+            tooltip: '设置',
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings_outlined),
+          ),
+        ],
+      ),
       body: _loadingPrefs
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
@@ -420,48 +567,29 @@ class _MainScreenState extends State<MainScreen> {
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(16),
                 children: [
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _sectionHeader(title: '个人设置'),
-                          const SizedBox(height: 12),
-                          TextField(
-                            controller: _nameCtrl,
-                            onChanged: _saveUsername,
-                            decoration: const InputDecoration(
-                              labelText: '用户名',
-                              hintText: '输入你的昵称',
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          TextField(
-                            controller: _roomNameCtrl,
-                            onChanged: _saveRoomNameDraft,
-                            decoration: const InputDecoration(
-                              labelText: '房间名称',
-                              hintText: '例如：下午茶房间',
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          ElevatedButton.icon(
-                            onPressed: _createRoom,
-                            icon: const Icon(Icons.add_home_outlined),
-                            label: const Text('创建房间（作为主机）'),
-                          ),
-                        ],
-                      ),
-                    ),
+                  _sectionHeader(
+                    title: _discovering
+                        ? '正在搜索局域网房间...'
+                        : '所有房间 (${mergedRooms.length})',
                   ),
                   const SizedBox(height: 12),
-                  _buildMyRoomsSection(),
-                  const SizedBox(height: 12),
-                  _buildLanRoomsSection(),
+                  if (mergedRooms.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 32),
+                      child: Center(child: Text('还没有房间，点击右下角加号创建')),
+                    )
+                  else
+                    ...mergedRooms.map(_buildRoomCard),
+                  const SizedBox(height: 88),
                 ],
               ),
             ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _openCreateRoomPopup,
+        tooltip: '创建房间',
+        child: const Icon(Icons.add),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 }
