@@ -76,6 +76,67 @@ class _RoomListItem {
   });
 }
 
+class _CreateRoomDialog extends StatefulWidget {
+  final String initialRoomName;
+
+  const _CreateRoomDialog({required this.initialRoomName});
+
+  @override
+  State<_CreateRoomDialog> createState() => _CreateRoomDialogState();
+}
+
+class _CreateRoomDialogState extends State<_CreateRoomDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialRoomName);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!mounted) return;
+    Navigator.of(context).pop(_controller.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('创建房间'),
+      content: SizedBox(
+        width: 420,
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(
+            labelText: '房间名称',
+            hintText: '例如：下午茶房间',
+          ),
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.add),
+          label: const Text('创建并开房'),
+        ),
+      ],
+    );
+  }
+}
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -247,7 +308,18 @@ class _MainScreenState extends State<MainScreen> {
       context,
     ).showSnackBar(SnackBar(content: Text('已创建房间：$roomName')));
 
-    await _openHostRoom(room);
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatRoomScreen(
+          serverUrl: room.serverUrl,
+          name: _username,
+          roomName: room.roomName,
+          roomId: room.roomId,
+          isHost: true,
+        ),
+      ),
+    );
     if (mounted) _refreshRooms();
   }
 
@@ -257,45 +329,12 @@ class _MainScreenState extends State<MainScreen> {
         prefs.getString(_prefsRoomNameKey)?.trim().isNotEmpty == true
         ? prefs.getString(_prefsRoomNameKey)!.trim()
         : '新房间';
-    var draftRoomName = initialRoomName;
 
     if (!mounted) return;
 
     final result = await showDialog<String>(
       context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('创建房间'),
-          content: SizedBox(
-            width: 420,
-            child: TextFormField(
-              initialValue: initialRoomName,
-              autofocus: true,
-              textInputAction: TextInputAction.done,
-              decoration: const InputDecoration(
-                labelText: '房间名称',
-                hintText: '例如：下午茶房间',
-              ),
-              onChanged: (value) {
-                draftRoomName = value;
-              },
-              onFieldSubmitted: (_) =>
-                  Navigator.of(dialogContext).pop(draftRoomName),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('取消'),
-            ),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(dialogContext).pop(draftRoomName),
-              icon: const Icon(Icons.add),
-              label: const Text('创建并开房'),
-            ),
-          ],
-        );
-      },
+      builder: (_) => _CreateRoomDialog(initialRoomName: initialRoomName),
     );
 
     if (result == null) return;
@@ -320,8 +359,10 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _openHostRoom(SavedRoomEntry room) async {
     if (!mounted) return;
-    final started = await _startHostRoom(room);
-    if (!started) return;
+    if (_hostService.activeRoomId != room.roomId) {
+      final started = await _startHostRoom(room);
+      if (!started) return;
+    }
     await Navigator.push(
       context,
       MaterialPageRoute(
@@ -372,16 +413,16 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _confirmDeleteRoom(SavedRoomEntry room) async {
     final shouldDelete = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('删除房间'),
         content: Text('确定删除“${room.roomName}”吗？'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('取消'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('删除'),
           ),
         ],
@@ -415,44 +456,14 @@ class _MainScreenState extends State<MainScreen> {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
         ),
-        ?action,
+        if (action != null) action,
       ],
     );
   }
 
   Widget _buildRoomCard(_RoomListItem room) {
-    final isRunning = room.isRunning;
-    final badgeWidgets = <Widget>[];
-
-    if (room.isMine) {
-      badgeWidgets.add(
-        const Padding(
-          padding: EdgeInsets.only(left: 8),
-          child: Chip(
-            visualDensity: VisualDensity.compact,
-            label: Text('我的房间'),
-          ),
-        ),
-      );
-    }
-
-    if (isRunning) {
-      badgeWidgets.add(
-        const Padding(
-          padding: EdgeInsets.only(left: 8),
-          child: Chip(visualDensity: VisualDensity.compact, label: Text('运行中')),
-        ),
-      );
-    }
-
-    if (room.isDiscovered && !room.isMine) {
-      badgeWidgets.add(
-        const Padding(
-          padding: EdgeInsets.only(left: 8),
-          child: Chip(visualDensity: VisualDensity.compact, label: Text('局域网')),
-        ),
-      );
-    }
+    final isRunning = room.isMine ? room.isRunning : room.isDiscovered;
+    final roomTag = room.isMine ? '我的房间' : (room.isDiscovered ? '局域网' : null);
 
     final subtitle = room.isMine
         ? '创建于: ${room.createdAt?.toLocal().toString().split('.').first ?? '-'}'
@@ -462,27 +473,73 @@ class _MainScreenState extends State<MainScreen> {
       padding: const EdgeInsets.only(bottom: 8),
       child: Card(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        child: ListTile(
-          leading: const Icon(Icons.home_work_outlined),
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(room.roomName),
-              if (badgeWidgets.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Wrap(spacing: 6, runSpacing: 6, children: badgeWidgets),
-              ],
-            ],
-          ),
-          subtitle: Text(subtitle),
-          isThreeLine: false,
-          trailing: Wrap(
-            spacing: 8,
-            children: [
-              IconButton(
-                tooltip: '进入',
-                onPressed: room.isMine
-                    ? () => _openHostRoom(
+        child: Stack(
+          children: [
+            ListTile(
+              contentPadding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+              leading: const Icon(Icons.home_work_outlined),
+              title: Text(room.roomName),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: isRunning ? Colors.green : Colors.red,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(isRunning ? '运行中' : '未运行'),
+                    const SizedBox(width: 8),
+                    Flexible(child: Text(subtitle, overflow: TextOverflow.ellipsis)),
+                  ],
+                ),
+              ),
+              isThreeLine: false,
+              trailing: Wrap(
+                spacing: 8,
+                children: [
+                  IconButton(
+                    tooltip: '进入',
+                    onPressed: room.isMine
+                        ? () => _openHostRoom(
+                            SavedRoomEntry(
+                              id: room.id,
+                              roomName: room.roomName,
+                              roomId: room.roomId,
+                              serverUrl: room.serverUrl,
+                              createdAt: room.createdAt ?? DateTime.now(),
+                            ),
+                          )
+                        : () => _openDiscoveredRoom(
+                            DiscoveredRoom(
+                              roomId: room.roomId,
+                              roomName: room.roomName,
+                              hostIp: room.serverUrl
+                                  .replaceFirst('ws://', '')
+                                  .split(':')
+                                  .first,
+                              wsPort:
+                                  int.tryParse(
+                                    room.serverUrl
+                                        .replaceFirst('ws://', '')
+                                        .split(':')
+                                        .last,
+                                  ) ??
+                                  8080,
+                              hostName: room.hostName,
+                            ),
+                          ),
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+                  if (room.isMine)
+                    IconButton(
+                      tooltip: '删除',
+                      onPressed: () => _confirmDeleteRoom(
                         SavedRoomEntry(
                           id: room.id,
                           roomName: room.roomName,
@@ -490,44 +547,31 @@ class _MainScreenState extends State<MainScreen> {
                           serverUrl: room.serverUrl,
                           createdAt: room.createdAt ?? DateTime.now(),
                         ),
-                      )
-                    : () => _openDiscoveredRoom(
-                        DiscoveredRoom(
-                          roomId: room.roomId,
-                          roomName: room.roomName,
-                          hostIp: room.serverUrl
-                              .replaceFirst('ws://', '')
-                              .split(':')
-                              .first,
-                          wsPort:
-                              int.tryParse(
-                                room.serverUrl
-                                    .replaceFirst('ws://', '')
-                                    .split(':')
-                                    .last,
-                              ) ??
-                              8080,
-                          hostName: room.hostName,
-                        ),
                       ),
-                icon: const Icon(Icons.chevron_right),
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                ],
               ),
-              if (room.isMine)
-                IconButton(
-                  tooltip: '删除',
-                  onPressed: () => _confirmDeleteRoom(
-                    SavedRoomEntry(
-                      id: room.id,
-                      roomName: room.roomName,
-                      roomId: room.roomId,
-                      serverUrl: room.serverUrl,
-                      createdAt: room.createdAt ?? DateTime.now(),
+            ),
+            if (roomTag != null)
+              Positioned(
+                top: 8,
+                right: 12,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    child: Text(
+                      roomTag,
+                      style: Theme.of(context).textTheme.labelSmall,
                     ),
                   ),
-                  icon: const Icon(Icons.delete_outline),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
