@@ -257,63 +257,48 @@ class _MainScreenState extends State<MainScreen> {
         prefs.getString(_prefsRoomNameKey)?.trim().isNotEmpty == true
         ? prefs.getString(_prefsRoomNameKey)!.trim()
         : '新房间';
-    final controller = TextEditingController(text: initialRoomName);
+    var draftRoomName = initialRoomName;
 
     if (!mounted) return;
 
-    final result = await showModalBottomSheet<String>(
+    final result = await showDialog<String>(
       context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 8,
-            bottom: MediaQuery.viewInsetsOf(sheetContext).bottom + 16,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('创建房间'),
+          content: SizedBox(
+            width: 420,
+            child: TextFormField(
+              initialValue: initialRoomName,
+              autofocus: true,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: '房间名称',
+                hintText: '例如：下午茶房间',
+              ),
+              onChanged: (value) {
+                draftRoomName = value;
+              },
+              onFieldSubmitted: (_) =>
+                  Navigator.of(dialogContext).pop(draftRoomName),
+            ),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                '创建房间',
-                style: Theme.of(
-                  sheetContext,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                textInputAction: TextInputAction.done,
-                decoration: const InputDecoration(
-                  labelText: '房间名称',
-                  hintText: '例如：下午茶房间',
-                ),
-                onSubmitted: (_) =>
-                    Navigator.of(sheetContext).pop(controller.text),
-              ),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: () =>
-                    Navigator.of(sheetContext).pop(controller.text),
-                icon: const Icon(Icons.add),
-                label: const Text('创建并开房'),
-              ),
-            ],
-          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(dialogContext).pop(draftRoomName),
+              icon: const Icon(Icons.add),
+              label: const Text('创建并开房'),
+            ),
+          ],
         );
       },
     );
 
-    controller.dispose();
     if (result == null) return;
-
-    if (!mounted) return;
-    await Future<void>.delayed(Duration.zero);
-    if (!mounted) return;
 
     await _createRoom(result);
   }
@@ -479,14 +464,18 @@ class _MainScreenState extends State<MainScreen> {
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         child: ListTile(
           leading: const Icon(Icons.home_work_outlined),
-          title: Row(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(child: Text(room.roomName)),
-              ...badgeWidgets,
+              Text(room.roomName),
+              if (badgeWidgets.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Wrap(spacing: 6, runSpacing: 6, children: badgeWidgets),
+              ],
             ],
           ),
           subtitle: Text(subtitle),
-          isThreeLine: true,
+          isThreeLine: false,
           trailing: Wrap(
             spacing: 8,
             children: [
