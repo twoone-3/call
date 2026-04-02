@@ -415,7 +415,7 @@ class _MainScreenState extends State<MainScreen> {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
           ),
         ),
-        if (action != null) action,
+        ?action,
       ],
     );
   }
