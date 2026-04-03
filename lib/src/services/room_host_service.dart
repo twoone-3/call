@@ -16,8 +16,7 @@ class RoomHostService {
 
   String? _roomId;
   String? _roomName;
-  String? _hostName;
-  int? _port;
+  
 
   String? get activeRoomId => _roomId;
   String? get activeRoomName => _roomName;
@@ -85,8 +84,6 @@ class RoomHostService {
     _server = server;
     _roomId = roomId;
     _roomName = roomName;
-    _hostName = hostName;
-    _port = server.port;
   }
 
   Future<void> stop() async {
@@ -106,7 +103,5 @@ class RoomHostService {
     _server = null;
     _roomId = null;
     _roomName = null;
-    _hostName = null;
-    _port = null;
   }
 }

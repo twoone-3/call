@@ -11,7 +11,7 @@ import '../services/room_host_service.dart';
 import 'chat_room.dart';
 import 'settings_screen.dart';
 
-const _defaultServerUrl = 'ws://0.0.0.0:8080';
+const _defaultServerUrl = 'ws://127.0.0.1:8080';
 const _prefsUsernameKey = 'main.username';
 const _prefsRoomNameKey = 'main.room_name';
 const _prefsRoomsKey = 'main.created_rooms';
@@ -200,6 +200,14 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  String _normalizeHostServerUrl(String url) {
+    final value = url.trim();
+    if (value.startsWith('ws://0.0.0.0:')) {
+      return value.replaceFirst('ws://0.0.0.0', 'ws://127.0.0.1');
+    }
+    return value;
+  }
+
   List<_RoomListItem> _buildMergedRooms() {
     final discoveredByRoomId = <String, DiscoveredRoom>{
       for (final room in _rooms) room.roomId: room,
@@ -312,7 +320,7 @@ class _MainScreenState extends State<MainScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => ChatRoomScreen(
-          serverUrl: room.serverUrl,
+          serverUrl: _normalizeHostServerUrl(room.serverUrl),
           name: _username,
           roomName: room.roomName,
           roomId: room.roomId,
@@ -367,7 +375,7 @@ class _MainScreenState extends State<MainScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => ChatRoomScreen(
-          serverUrl: room.serverUrl,
+          serverUrl: _normalizeHostServerUrl(room.serverUrl),
           name: _username,
           roomName: room.roomName,
           roomId: room.roomId,
@@ -431,13 +439,6 @@ class _MainScreenState extends State<MainScreen> {
 
     if (shouldDelete != true) return;
 
-    if (_hostService.activeRoomId == room.roomId) {
-      await _hostService.stop();
-      if (mounted) {
-        setState(() {});
-      }
-    }
-
     final updatedRooms = _savedRooms
         .where((item) => item.id != room.id)
         .toList();
@@ -461,9 +462,44 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  Widget _buildActionPanel() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          children: [
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _openCreateRoomPopup,
+                icon: const Icon(Icons.videocam),
+                label: const Text('快速会议'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  await _refreshRooms();
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已刷新，请在下方“局域网会议”选择加入')),
+                  );
+                },
+                icon: const Icon(Icons.meeting_room_outlined),
+                label: const Text('加入会议'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildRoomCard(_RoomListItem room) {
     final isRunning = room.isMine ? room.isRunning : room.isDiscovered;
-    final roomTag = room.isMine ? '我的房间' : (room.isDiscovered ? '局域网' : null);
+    final roomTag = room.isMine ? '历史' : (room.isDiscovered ? '局域网' : null);
 
     final subtitle = room.isMine
         ? '创建于: ${room.createdAt?.toLocal().toString().split('.').first ?? '-'}'
@@ -495,7 +531,9 @@ class _MainScreenState extends State<MainScreen> {
                     const SizedBox(width: 6),
                     Text(isRunning ? '运行中' : '未运行'),
                     const SizedBox(width: 8),
-                    Flexible(child: Text(subtitle, overflow: TextOverflow.ellipsis)),
+                    Flexible(
+                      child: Text(subtitle, overflow: TextOverflow.ellipsis),
+                    ),
                   ],
                 ),
               ),
@@ -538,7 +576,7 @@ class _MainScreenState extends State<MainScreen> {
                   ),
                   if (room.isMine)
                     IconButton(
-                      tooltip: '删除',
+                      tooltip: '移除历史',
                       onPressed: () => _confirmDeleteRoom(
                         SavedRoomEntry(
                           id: room.id,
@@ -563,7 +601,10 @@ class _MainScreenState extends State<MainScreen> {
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
                     child: Text(
                       roomTag,
                       style: Theme.of(context).textTheme.labelSmall,
@@ -580,6 +621,8 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     final mergedRooms = _buildMergedRooms();
+    final historyRooms = mergedRooms.where((room) => room.isMine).toList();
+    final lanRooms = mergedRooms.where((room) => !room.isMine).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -600,29 +643,40 @@ class _MainScreenState extends State<MainScreen> {
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(16),
                 children: [
-                  _sectionHeader(
-                    title: _discovering
-                        ? '正在搜索局域网房间...'
-                        : '所有房间 (${mergedRooms.length})',
-                  ),
+                  _buildActionPanel(),
                   const SizedBox(height: 12),
-                  if (mergedRooms.isEmpty)
+                  _sectionHeader(title: '会议历史 (${historyRooms.length})'),
+                  const SizedBox(height: 8),
+                  if (historyRooms.isEmpty)
                     const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 32),
-                      child: Center(child: Text('还没有房间，点击右下角加号创建')),
+                      padding: EdgeInsets.symmetric(vertical: 14),
+                      child: Text('暂无历史会议，可点击“快速会议”开始'),
                     )
                   else
-                    ...mergedRooms.map(_buildRoomCard),
-                  const SizedBox(height: 88),
+                    ...historyRooms.map(_buildRoomCard),
+                  const SizedBox(height: 8),
+                  _sectionHeader(
+                    title: _discovering
+                        ? '局域网会议（搜索中...）'
+                        : '局域网会议 (${lanRooms.length})',
+                    action: IconButton(
+                      tooltip: '刷新局域网会议',
+                      onPressed: _refreshRooms,
+                      icon: const Icon(Icons.refresh),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (lanRooms.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 14),
+                      child: Text('当前未发现可加入的局域网会议'),
+                    )
+                  else
+                    ...lanRooms.map(_buildRoomCard),
+                  const SizedBox(height: 24),
                 ],
               ),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _openCreateRoomPopup,
-        tooltip: '创建房间',
-        child: const Icon(Icons.add),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 }

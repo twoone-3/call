@@ -23,6 +23,12 @@ class SignalingService {
         }
       }, onDone: () {
         _messages.add({'type': 'disconnected'});
+      }, onError: (error) {
+        _messages.add({
+          'type': 'error',
+          'message': 'socket-error',
+          'detail': error.toString(),
+        });
       });
     } catch (e) {
       _messages.add({'type': 'error', 'message': 'connect-failed', 'detail': e.toString()});
@@ -34,10 +40,53 @@ class SignalingService {
     send({'type': isHost ? 'create' : 'join', 'name': name, 'room': roomId});
   }
 
+  // Video signaling methods
+  void sendVideoOffer(String peerId, String sdp) {
+    send({
+      'type': 'video-offer',
+      'from': name,
+      'to': peerId,
+      'sdp': sdp,
+    });
+  }
+
+  void sendVideoAnswer(String peerId, String sdp) {
+    send({
+      'type': 'video-answer',
+      'from': name,
+      'to': peerId,
+      'sdp': sdp,
+    });
+  }
+
+  void sendIceCandidate(
+    String peerId,
+    String candidate,
+    int sdpMLineIndex,
+    String sdpMid,
+  ) {
+    send({
+      'type': 'ice-candidate',
+      'from': name,
+      'to': peerId,
+      'candidate': candidate,
+      'sdpMLineIndex': sdpMLineIndex,
+      'sdpMid': sdpMid,
+    });
+  }
+
   Stream<Map<String, dynamic>> get messages => _messages.stream;
 
   void send(Map<String, dynamic> m) {
-    _channel?.sink.add(jsonEncode(m));
+    try {
+      _channel?.sink.add(jsonEncode(m));
+    } catch (e) {
+      _messages.add({
+        'type': 'error',
+        'message': 'send-failed',
+        'detail': e.toString(),
+      });
+    }
   }
 
   void dispose() {

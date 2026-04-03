@@ -39,6 +39,7 @@ dependencies:
   provider: any
   uuid: any
   shared_preferences: any
+  permission_handler: any
 
 dev_dependencies:
   flutter_test:
