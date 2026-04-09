@@ -7,6 +7,24 @@ Future<void> main() async {
 
   final clients = <WebSocket>[];
   final rooms = <String, List<WebSocket>>{};
+  final names = <WebSocket, String>{};
+
+  void broadcastRoomState(String room, [String? joinedName, bool isJoin = false]) {
+    final count = rooms[room]?.length ?? 0;
+    final members = rooms[room] ?? const <WebSocket>[];
+    for (var c in members) {
+      try {
+        c.add(
+          jsonEncode({
+            'type': isJoin ? 'peer-joined' : 'room-state',
+            'room': room,
+            if (joinedName != null) 'name': joinedName,
+            'onlineCount': count,
+          }),
+        );
+      } catch (_) {}
+    }
+  }
 
   await for (var request in server) {
     if (WebSocketTransformer.isUpgradeRequest(request)) {
@@ -23,18 +41,18 @@ Future<void> main() async {
               final room = obj['room'] as String? ?? '';
               rooms.putIfAbsent(room, () => []).add(ws);
               currentRoom = room;
+              names[ws] = (obj['name'] as String? ?? '').trim();
               ws.add(jsonEncode({'type': 'created', 'room': room}));
               print('Room created: $room by ${ws.hashCode}');
+              broadcastRoomState(room);
             } else if (type == 'join') {
               final room = obj['room'] as String? ?? '';
               if (rooms.containsKey(room)) {
                 rooms[room]!.add(ws);
                 currentRoom = room;
+                names[ws] = (obj['name'] as String? ?? '').trim();
                 ws.add(jsonEncode({'type': 'joined', 'room': room}));
-                // notify others in room
-                for (var c in rooms[room]!) {
-                  if (c != ws) c.add(jsonEncode({'type': 'peer-joined', 'room': room}));
-                }
+                broadcastRoomState(room, names[ws], true);
                 print('Client ${ws.hashCode} joined room $room');
               } else {
                 ws.add(jsonEncode({'type': 'error', 'message': 'room-not-found'}));
@@ -42,7 +60,9 @@ Future<void> main() async {
             } else if (type == 'leave') {
               final room = obj['room'] as String? ?? '';
               rooms[room]?.remove(ws);
+              names.remove(ws);
               currentRoom = null;
+              broadcastRoomState(room);
             } else {
               // relay to members of the same room if present, otherwise broadcast to all
               if (currentRoom != null && rooms.containsKey(currentRoom)) {
@@ -60,11 +80,21 @@ Future<void> main() async {
           }
         }, onDone: () {
           clients.remove(ws);
-          if (currentRoom != null) rooms[currentRoom!]?.remove(ws);
+          final leftRoom = currentRoom;
+          if (leftRoom != null) {
+            rooms[leftRoom]?.remove(ws);
+            names.remove(ws);
+            broadcastRoomState(leftRoom);
+          }
           print('Client disconnected: ${ws.hashCode}');
         }, onError: (err) {
           clients.remove(ws);
-          if (currentRoom != null) rooms[currentRoom!]?.remove(ws);
+          final leftRoom = currentRoom;
+          if (leftRoom != null) {
+            rooms[leftRoom]?.remove(ws);
+            names.remove(ws);
+            broadcastRoomState(leftRoom);
+          }
           print('WebSocket error: $err');
         });
       });

@@ -12,6 +12,7 @@ class RoomHostService {
 
   io.HttpServer? _server;
   final List<io.WebSocket> _clients = [];
+  final Map<io.WebSocket, String> _clientNames = {};
   final DiscoveryService _discovery = DiscoveryService();
 
   String? _roomId;
@@ -20,6 +21,7 @@ class RoomHostService {
 
   String? get activeRoomId => _roomId;
   String? get activeRoomName => _roomName;
+  int get onlineCount => _clients.length;
 
   bool get isRunning => _server != null;
 
@@ -46,6 +48,7 @@ class RoomHostService {
       roomName: roomName,
       wsPort: server.port,
       hostName: hostName,
+      onlineCountProvider: () => onlineCount,
     );
 
     server.listen((io.HttpRequest request) {
@@ -56,6 +59,34 @@ class RoomHostService {
             (data) {
               try {
                 final obj = jsonDecode(data as String) as Map<String, dynamic>;
+                final type = obj['type'] as String? ?? '';
+                final name = (obj['name'] as String? ?? '').trim();
+                if (type == 'create' || type == 'join') {
+                  if (name.isNotEmpty) {
+                    _clientNames[ws] = name;
+                  }
+                  final payload = {
+                    'type': 'room-state',
+                    'room': roomId,
+                    'onlineCount': onlineCount,
+                  };
+                  try {
+                    ws.add(jsonEncode(payload));
+                  } catch (_) {}
+                  for (final client in List<io.WebSocket>.from(_clients)) {
+                    if (client != ws) {
+                      try {
+                        client.add(jsonEncode({
+                          'type': 'peer-joined',
+                          'room': roomId,
+                          'name': name,
+                          'onlineCount': onlineCount,
+                        }));
+                      } catch (_) {}
+                    }
+                  }
+                  return;
+                }
                 for (final client in List<io.WebSocket>.from(_clients)) {
                   if (client != ws) {
                     try {
@@ -66,9 +97,21 @@ class RoomHostService {
               } catch (_) {}
             },
             onDone: () {
+              final leftName = _clientNames.remove(ws) ?? '成员';
               _clients.remove(ws);
+              for (final client in List<io.WebSocket>.from(_clients)) {
+                try {
+                  client.add(jsonEncode({
+                    'type': 'peer-left',
+                    'room': roomId,
+                    'name': leftName,
+                    'onlineCount': onlineCount,
+                  }));
+                } catch (_) {}
+              }
             },
             onError: (_) {
+              _clientNames.remove(ws);
               _clients.remove(ws);
             },
           );
@@ -95,6 +138,7 @@ class RoomHostService {
       } catch (_) {}
     }
     _clients.clear();
+    _clientNames.clear();
 
     try {
       await _server?.close(force: true);

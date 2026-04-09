@@ -63,6 +63,7 @@ class _RoomListItem {
   final bool isRunning;
   final DateTime? createdAt;
   final bool isDiscovered;
+  final int? onlineCount;
 
   const _RoomListItem({
     required this.id,
@@ -74,6 +75,7 @@ class _RoomListItem {
     required this.isRunning,
     required this.createdAt,
     required this.isDiscovered,
+    required this.onlineCount,
   });
 }
 
@@ -236,6 +238,8 @@ class _MainScreenState extends State<MainScreen> {
           isRunning: _hostService.activeRoomId == room.roomId,
           createdAt: room.createdAt,
           isDiscovered: discovered != null,
+            onlineCount:
+              _hostService.activeRoomId == room.roomId ? _hostService.onlineCount : 0,
         ),
       );
     }
@@ -252,6 +256,7 @@ class _MainScreenState extends State<MainScreen> {
           isRunning: false,
           createdAt: null,
           isDiscovered: true,
+          onlineCount: room.onlineCount,
         ),
       );
     }
@@ -474,6 +479,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildRoomCard(_RoomListItem room) {
     final isRunning = room.isMine ? room.isRunning : room.isDiscovered;
     final roomTag = room.isMine ? '历史' : (room.isDiscovered ? '局域网' : null);
+    final onlineLabel = room.onlineCount == null ? null : '在线 ${room.onlineCount} 人';
 
     final subtitle = room.isMine
         ? '创建于: ${room.createdAt?.toLocal().toString().split('.').first ?? '-'}'
@@ -505,6 +511,10 @@ class _MainScreenState extends State<MainScreen> {
                     const SizedBox(width: 6),
                     Text(isRunning ? '运行中' : '未运行'),
                     const SizedBox(width: 8),
+                    if (onlineLabel != null) ...[
+                      Text(onlineLabel),
+                      const SizedBox(width: 8),
+                    ],
                     Flexible(
                       child: Text(subtitle, overflow: TextOverflow.ellipsis),
                     ),
@@ -544,6 +554,7 @@ class _MainScreenState extends State<MainScreen> {
                                   ) ??
                                   8080,
                               hostName: room.hostName,
+                              onlineCount: room.onlineCount ?? 1,
                             ),
                           ),
                     icon: const Icon(Icons.chevron_right),

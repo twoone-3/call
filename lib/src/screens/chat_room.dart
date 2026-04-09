@@ -64,7 +64,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   bool _showVideo = false;
   bool _videoInitialized = false;
   String? _remotePeerId;
-  final Set<String> _announcedMembers = <String>{};
+  int _onlineCount = 1;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
@@ -178,6 +178,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     if (shouldStickToBottom) {
       _scrollToBottom();
     }
+  }
+
+  void _updateOnlineCount(int count) {
+    final normalized = count < 1 ? 1 : count;
+    if (_onlineCount == normalized) return;
+    if (!mounted) {
+      _onlineCount = normalized;
+      return;
+    }
+    setState(() => _onlineCount = normalized);
   }
 
   Future<void> _initializeVideo() async {
@@ -374,7 +384,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     _signaling!.joinRoom(widget.roomId, widget.isHost);
     _rtcLog('joinRoom sent: role=${widget.isHost ? 'host' : 'guest'}');
-    _announcedMembers.add(widget.name);
     // announce presence so peers can learn our name
     _signaling!.send({'type': 'announce', 'name': widget.name, 'isHost': widget.isHost});
     _rtcLog('announce sent');
@@ -413,23 +422,23 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         if (shouldStickToBottom) {
           _scrollToBottom();
         }
+      } else if (type == 'room-state') {
+        final count = (m['onlineCount'] as num?)?.toInt() ?? 1;
+        _updateOnlineCount(count);
       } else if (type == 'peer-joined') {
-        // Host re-announces when a new peer joins so late joiners can learn host id.
-        if (widget.isHost) {
-          _rtcLog('peer-joined received, host re-announce');
-          _signaling?.send({
-            'type': 'announce',
-            'name': widget.name,
-            'isHost': widget.isHost,
-          });
+        final name = (m['name'] as String?)?.trim() ?? '';
+        final count = (m['onlineCount'] as num?)?.toInt() ?? _onlineCount;
+        _updateOnlineCount(count);
+        if (name.isNotEmpty && name != widget.name) {
+          _appendSystemMessage('$name 进入了房间');
         }
+      } else if (type == 'peer-left') {
+        final count = (m['onlineCount'] as num?)?.toInt() ?? (_onlineCount - 1);
+        _updateOnlineCount(count);
       } else if (type == 'announce') {
         final name = (m['name'] as String?)?.trim() ?? '';
         if (name.isEmpty) return;
         _rtcLog('announce from=$name');
-        if (name != widget.name && _announcedMembers.add(name)) {
-          _appendSystemMessage('$name 进入了房间');
-        }
         if (_remotePeerId == null && name != widget.name) {
           _remotePeerId = name;
           _rtcLog('set remotePeerId=$_remotePeerId');
@@ -792,7 +801,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.roomName),
+        title: Text('${widget.roomName}（$_onlineCount）'),
         actions: [
           if (_videoInitialized)
             Tooltip(

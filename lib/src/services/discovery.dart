@@ -8,6 +8,7 @@ class DiscoveredRoom {
   final String hostIp;
   final int wsPort;
   final String hostName;
+  final int onlineCount;
 
   const DiscoveredRoom({
     required this.roomId,
@@ -15,6 +16,7 @@ class DiscoveredRoom {
     required this.hostIp,
     required this.wsPort,
     required this.hostName,
+    required this.onlineCount,
   });
 
   String get serverUrl => 'ws://$hostIp:$wsPort';
@@ -34,6 +36,7 @@ class DiscoveryService {
     required String roomName,
     required int wsPort,
     required String hostName,
+    required int Function() onlineCountProvider,
   }) async {
     await stopHostAdvertiser();
 
@@ -59,6 +62,7 @@ class DiscoveryService {
           'roomName': roomName,
           'wsPort': wsPort,
           'hostName': hostName,
+          'onlineCount': onlineCountProvider(),
         });
         socket.send(utf8.encode(resp), dg.address, dg.port);
       } catch (_) {
@@ -131,6 +135,7 @@ class DiscoveryService {
           hostIp: dg.address.address,
           wsPort: port,
           hostName: hostName.isEmpty ? 'host' : hostName,
+          onlineCount: (obj['onlineCount'] as num?)?.toInt() ?? 1,
         );
         found[room.dedupeKey] = room;
       } catch (_) {
