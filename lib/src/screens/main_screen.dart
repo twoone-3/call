@@ -462,41 +462,6 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildActionPanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          children: [
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _openCreateRoomPopup,
-                icon: const Icon(Icons.videocam),
-                label: const Text('快速会议'),
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () async {
-                  await _refreshRooms();
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已刷新，请在下方“局域网会议”选择加入')),
-                  );
-                },
-                icon: const Icon(Icons.meeting_room_outlined),
-                label: const Text('加入会议'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildRoomCard(_RoomListItem room) {
     final isRunning = room.isMine ? room.isRunning : room.isDiscovered;
     final roomTag = room.isMine ? '历史' : (room.isDiscovered ? '局域网' : null);
@@ -635,7 +600,7 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ],
       ),
-      body: _loadingPrefs
+        body: _loadingPrefs
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
               onRefresh: _refreshRooms,
@@ -643,7 +608,6 @@ class _MainScreenState extends State<MainScreen> {
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(16),
                 children: [
-                  _buildActionPanel(),
                   const SizedBox(height: 12),
                   _sectionHeader(title: '会议历史 (${historyRooms.length})'),
                   const SizedBox(height: 8),
@@ -677,6 +641,11 @@ class _MainScreenState extends State<MainScreen> {
                 ],
               ),
             ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _openCreateRoomPopup,
+        icon: const Icon(Icons.videocam),
+        label: const Text('快速会议'),
+      ),
     );
   }
 }

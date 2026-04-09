@@ -40,6 +40,7 @@ dependencies:
   uuid: any
   shared_preferences: any
   permission_handler: any
+  window_size: any
 
 dev_dependencies:
   flutter_test:
