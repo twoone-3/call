@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../services/discovery.dart';
 import '../services/room_host_service.dart';
+import '../services/username_store.dart';
 import 'chat_room.dart';
 import 'settings_screen.dart';
 
@@ -163,8 +164,9 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _loadState() async {
     final prefs = await _prefs;
-    final username = prefs.getString(_prefsUsernameKey);
     final rawRooms = prefs.getStringList(_prefsRoomsKey) ?? const [];
+    final storedUsername = await UsernameStore.instance.readUsername();
+    final sharedUsername = prefs.getString(_prefsUsernameKey);
 
     final loadedRooms = <SavedRoomEntry>[];
     for (final raw in rawRooms) {
@@ -179,17 +181,24 @@ class _MainScreenState extends State<MainScreen> {
 
     if (!mounted) return;
     setState(() {
-      _username = username?.trim().isNotEmpty == true ? username! : 'user';
+      _username = storedUsername?.trim().isNotEmpty == true
+          ? storedUsername!
+          : sharedUsername?.trim().isNotEmpty == true
+              ? sharedUsername!
+              : 'user';
       _savedRooms = loadedRooms;
       _loadingPrefs = false;
     });
+
+    if (storedUsername == null && _username.trim().isNotEmpty) {
+      await UsernameStore.instance.writeUsername(_username);
+    }
 
     await _refreshRooms();
   }
 
   Future<void> _saveUsername(String value) async {
-    final prefs = await _prefs;
-    await prefs.setString(_prefsUsernameKey, value);
+    await UsernameStore.instance.writeUsername(value);
   }
 
   Future<void> _saveSavedRooms(List<SavedRoomEntry> rooms) async {

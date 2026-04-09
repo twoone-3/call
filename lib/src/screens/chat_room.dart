@@ -24,6 +24,12 @@ class _ChatMessageEntry extends _ChatTimelineEntry {
   const _ChatMessageEntry(this.message);
 }
 
+class _ChatSystemEntry extends _ChatTimelineEntry {
+  final String text;
+
+  const _ChatSystemEntry(this.text);
+}
+
 class ChatRoomScreen extends StatefulWidget {
   final String serverUrl;
   final String name;
@@ -58,6 +64,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   bool _showVideo = false;
   bool _videoInitialized = false;
   String? _remotePeerId;
+  final Set<String> _announcedMembers = <String>{};
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
@@ -119,6 +126,58 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         );
       }
     });
+  }
+
+  int _stableHash(String input) {
+    var hash = 0x811c9dc5;
+    for (final codeUnit in input.codeUnits) {
+      hash ^= codeUnit;
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    return hash;
+  }
+
+  Color _avatarColor(String name) {
+    final colors = <Color>[
+      Colors.blue,
+      Colors.teal,
+      Colors.green,
+      Colors.orange,
+      Colors.red,
+      Colors.pink,
+      Colors.indigo,
+      Colors.cyan,
+      Colors.amber,
+      Colors.deepPurple,
+    ];
+    return colors[_stableHash(name) % colors.length];
+  }
+
+  String _avatarLabel(ChatMessageRecord message) {
+    final text = message.from.trim();
+    if (text.isEmpty) return '?';
+    return text.substring(0, 1).toUpperCase();
+  }
+
+  void _appendSystemMessage(String text) {
+    final now = DateTime.now();
+    final shouldStickToBottom = _isAtBottom();
+    final message = ChatMessageRecord(
+      from: '系统',
+      text: text,
+      time: now,
+      isMine: false,
+    );
+    setState(() {
+      _messages.add(message);
+      if (!shouldStickToBottom) {
+        _unreadCount++;
+      }
+    });
+    _cache.appendMessage(widget.roomId, message);
+    if (shouldStickToBottom) {
+      _scrollToBottom();
+    }
   }
 
   Future<void> _initializeVideo() async {
@@ -315,6 +374,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     _signaling!.joinRoom(widget.roomId, widget.isHost);
     _rtcLog('joinRoom sent: role=${widget.isHost ? 'host' : 'guest'}');
+    _announcedMembers.add(widget.name);
     // announce presence so peers can learn our name
     _signaling!.send({'type': 'announce', 'name': widget.name, 'isHost': widget.isHost});
     _rtcLog('announce sent');
@@ -367,6 +427,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         final name = (m['name'] as String?)?.trim() ?? '';
         if (name.isEmpty) return;
         _rtcLog('announce from=$name');
+        if (name != widget.name && _announcedMembers.add(name)) {
+          _appendSystemMessage('$name 进入了房间');
+        }
         if (_remotePeerId == null && name != widget.name) {
           _remotePeerId = name;
           _rtcLog('set remotePeerId=$_remotePeerId');
@@ -567,17 +630,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         entries.add(_ChatDateEntry(messageDate));
         lastDate = messageDate;
       }
+      if (message.from == '系统') {
+        entries.add(_ChatSystemEntry(message.text));
+        continue;
+      }
       entries.add(_ChatMessageEntry(message));
     }
 
     return entries;
-  }
-
-  String _avatarLabel(ChatMessageRecord message) {
-    if (message.isMine) return '我';
-    final text = message.from.trim();
-    if (text.isEmpty) return '?';
-    return text[0].toUpperCase();
   }
 
   Widget _buildMessageBubble(ChatMessageRecord message) {
@@ -585,20 +645,18 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final bubbleColor = isMine
         ? Theme.of(context).colorScheme.primaryContainer
         : Theme.of(context).colorScheme.surfaceContainerHighest;
+    final avatarColor = _avatarColor(message.from);
 
     final avatar = CircleAvatar(
       radius: 16,
-      backgroundColor: isMine
-          ? Theme.of(context).colorScheme.primary
-          : Theme.of(context).colorScheme.secondary,
-      foregroundColor: isMine
-          ? Theme.of(context).colorScheme.onPrimary
-          : Theme.of(context).colorScheme.onSecondary,
+      backgroundColor: avatarColor,
+      foregroundColor: Colors.white,
       child: Text(
         _avatarLabel(message),
-        style: Theme.of(
-          context,
-        ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w700),
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: Colors.white,
+        ),
       ),
     );
 
@@ -614,23 +672,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 ? CrossAxisAlignment.end
                 : CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    isMine ? '我' : message.from,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _formatTime(message.time),
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
               Text(message.text),
             ],
           ),
@@ -648,6 +689,27 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         children: isMine
             ? [bubble, const SizedBox(width: 8), avatar]
             : [avatar, const SizedBox(width: 8), bubble],
+      ),
+    );
+  }
+
+  Widget _buildSystemNotice(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              text,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -834,6 +896,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 final entry = timelineEntries[i];
                 if (entry is _ChatDateEntry) {
                   return _buildDateDivider(entry.date);
+                }
+                if (entry is _ChatSystemEntry) {
+                  return _buildSystemNotice(entry.text);
                 }
                 return _buildMessageBubble(
                   (entry as _ChatMessageEntry).message,
