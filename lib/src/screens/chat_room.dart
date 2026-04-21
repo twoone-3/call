@@ -602,12 +602,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _scrollToBottom();
   }
 
-  String _formatTime(DateTime t) {
-    final hh = t.hour.toString().padLeft(2, '0');
-    final mm = t.minute.toString().padLeft(2, '0');
-    return '$hh:$mm';
-  }
-
   bool _isSameDay(DateTime a, DateTime b) {
     return a.year == b.year && a.month == b.month && a.day == b.day;
   }

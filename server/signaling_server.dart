@@ -3,7 +3,6 @@ import 'dart:convert';
 
 Future<void> main() async {
   final server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
-  print('Signaling server running on ws://0.0.0.0:8080');
 
   final clients = <WebSocket>[];
   final rooms = <String, List<WebSocket>>{};
