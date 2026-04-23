@@ -60,13 +60,25 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   final ScrollController _scrollController = ScrollController();
   bool _userAtBottom = true;
   int _unreadCount = 0;
-  VideoService? _videoService;
+  final Map<String, VideoService> _peerServices = {};
+  final Map<String, RTCVideoRenderer> _remoteRenderers = {};
+  final Set<String> _creatingPeers = {};
+  final Set<String> _knownPeers = {};
+  final Set<String> _pendingPeers = {};
+  final Map<String, String> _peerNames = {};
+  final Map<String, String> _pendingOffers = {};
+  final Map<String, String> _pendingAnswers = {};
+  final Map<String, List<Map<String, dynamic>>> _pendingCandidates = {};
+  final Map<String, int> _offerRetryCounts = {};
+  final Map<String, Timer> _offerRetryTimers = {};
+  MediaStream? _localStream;
+  String? _selfPeerId;
+  bool _audioEnabled = true;
+  bool _videoEnabled = true;
   bool _showVideo = false;
   bool _videoInitialized = false;
-  String? _remotePeerId;
   int _onlineCount = 1;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
   String get _rtcTag =>
       '${widget.isHost ? 'host' : 'guest'}:${widget.name}/${widget.roomId}';
@@ -190,6 +202,290 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     setState(() => _onlineCount = normalized);
   }
 
+  bool _shouldInitiateOfferForPeer(String peerId) {
+    final self = _selfPeerId;
+    if (self == null || self.isEmpty) return false;
+    return self.compareTo(peerId) > 0;
+  }
+
+  Future<void> _kickstartMeshHandshake() async {
+    if (_selfPeerId == null || _selfPeerId!.isEmpty) return;
+    final peers = {..._knownPeers, ..._peerServices.keys, ..._pendingPeers};
+    for (final peerId in peers) {
+      if (!_shouldInitiateOfferForPeer(peerId)) continue;
+      await _ensurePeerConnection(peerId, initiateOffer: false);
+      final service = _peerServices[peerId];
+      final renderer = _remoteRenderers[peerId];
+      if (service == null) continue;
+      if (renderer?.srcObject != null) continue;
+      try {
+        await service.createOffer();
+        _scheduleOfferRetry(peerId);
+      } catch (e) {
+        _rtcLog('kickstart offer failed peer=$peerId error=$e');
+      }
+    }
+  }
+
+  String _peerLabel(String peerId) {
+    final name = (_peerNames[peerId] ?? '').trim();
+    if (name.isNotEmpty) return name;
+    return peerId;
+  }
+
+  String _messagePeerId(Map<String, dynamic> m, {required String keyPrefix}) {
+    final fromPeerId = (m['${keyPrefix}PeerId'] as String? ?? '').trim();
+    if (fromPeerId.isNotEmpty) return fromPeerId;
+    return (m[keyPrefix] as String? ?? '').trim();
+  }
+
+  void _scheduleOfferRetry(String peerId) {
+    _offerRetryTimers.remove(peerId)?.cancel();
+    final retries = _offerRetryCounts[peerId] ?? 0;
+    if (retries >= 2) return;
+    _offerRetryTimers[peerId] = Timer(const Duration(seconds: 5), () async {
+      final service = _peerServices[peerId];
+      final renderer = _remoteRenderers[peerId];
+      if (service == null || renderer == null) return;
+      if (renderer.srcObject != null) return;
+      _offerRetryCounts[peerId] = retries + 1;
+      _rtcLog('retry offer to $peerId attempt=${retries + 1}');
+      try {
+        await service.createOffer();
+      } catch (_) {}
+      _scheduleOfferRetry(peerId);
+    });
+  }
+
+  Future<void> _setLocalAudioEnabled(bool enabled) async {
+    _audioEnabled = enabled;
+    final stream = _localStream;
+    if (stream != null) {
+      for (final track in stream.getAudioTracks()) {
+        track.enabled = enabled;
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _setLocalVideoEnabled(bool enabled) async {
+    _videoEnabled = enabled;
+    final stream = _localStream;
+    if (stream != null) {
+      for (final track in stream.getVideoTracks()) {
+        track.enabled = enabled;
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _ensurePeerConnection(
+    String peerId, {
+    required bool initiateOffer,
+  }) async {
+    if (peerId.isEmpty || peerId == _selfPeerId) return;
+    if (_peerServices.containsKey(peerId) || _creatingPeers.contains(peerId)) {
+      return;
+    }
+    if (_localStream == null) {
+      _knownPeers.add(peerId);
+      _pendingPeers.add(peerId);
+      _rtcLog('skip ensurePeerConnection $peerId: local stream not ready');
+      return;
+    }
+    _pendingPeers.remove(peerId);
+    _creatingPeers.add(peerId);
+    _knownPeers.add(peerId);
+    _rtcLog('create peer connection: $peerId initiate=$initiateOffer');
+    final renderer = RTCVideoRenderer();
+    await renderer.initialize();
+
+    final service = VideoService(
+      peerId: '${widget.name}->$peerId',
+      sharedLocalStream: _localStream,
+      logger: _rtcLog,
+      onRemoteStreamAdded: (stream) {
+        _rtcLog('remote stream added from=$peerId');
+        renderer.srcObject = stream;
+        _offerRetryTimers.remove(peerId)?.cancel();
+        _offerRetryCounts.remove(peerId);
+        if (mounted) setState(() {});
+      },
+      onIceCandidate: (candidate, sdpMLineIndex, sdpMid) {
+        _signaling?.send({
+          'type': 'ice-candidate',
+          'from': widget.name,
+          'fromPeerId': _selfPeerId,
+          'room': widget.roomId,
+          'to': peerId,
+          'toPeerId': peerId,
+          'candidate': candidate,
+          'sdpMLineIndex': sdpMLineIndex,
+          'sdpMid': sdpMid,
+        });
+      },
+      onOfferCreated: (sdp) {
+        _signaling?.send({
+          'type': 'video-offer',
+          'from': widget.name,
+          'fromPeerId': _selfPeerId,
+          'room': widget.roomId,
+          'to': peerId,
+          'toPeerId': peerId,
+          'sdp': sdp,
+        });
+      },
+      onAnswerCreated: (sdp) {
+        _signaling?.send({
+          'type': 'video-answer',
+          'from': widget.name,
+          'fromPeerId': _selfPeerId,
+          'room': widget.roomId,
+          'to': peerId,
+          'toPeerId': peerId,
+          'sdp': sdp,
+        });
+      },
+    );
+
+    try {
+      await service.initialize();
+      await service.setAudioEnabled(_audioEnabled);
+      await service.setVideoEnabled(_videoEnabled);
+      _peerServices[peerId] = service;
+      _remoteRenderers[peerId] = renderer;
+      if (mounted) {
+        setState(() {
+          _videoInitialized = true;
+          _showVideo = true;
+        });
+      }
+      await _applyPendingForPeer(peerId);
+      if (initiateOffer) {
+        await _kickstartMeshHandshake();
+      }
+    } catch (e) {
+      _rtcLog('create peer failed: $peerId error=$e');
+      await service.dispose();
+      await renderer.dispose();
+    } finally {
+      _creatingPeers.remove(peerId);
+    }
+  }
+
+  Future<void> _applyPendingForPeer(String peerId) async {
+    final service = _peerServices[peerId];
+    if (service == null) return;
+
+    final offer = _pendingOffers.remove(peerId);
+    if (offer != null && offer.isNotEmpty) {
+      try {
+        await service.setRemoteOffer(offer);
+      } catch (e) {
+        _rtcLog('apply pending offer failed peer=$peerId error=$e');
+      }
+    }
+
+    final answer = _pendingAnswers.remove(peerId);
+    if (answer != null && answer.isNotEmpty) {
+      try {
+        await service.setRemoteAnswer(answer);
+      } catch (e) {
+        _rtcLog('apply pending answer failed peer=$peerId error=$e');
+      }
+    }
+
+    final candidates = _pendingCandidates.remove(peerId) ?? const [];
+    for (final c in candidates) {
+      final candidate = (c['candidate'] as String? ?? '').trim();
+      final sdpMLineIndex = (c['sdpMLineIndex'] as num?)?.toInt() ?? 0;
+      final sdpMid = (c['sdpMid'] as String? ?? '').trim();
+      if (candidate.isEmpty) continue;
+      try {
+        await service.addIceCandidate(candidate, sdpMLineIndex, sdpMid);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _removePeerConnection(String peerId) async {
+    _offerRetryTimers.remove(peerId)?.cancel();
+    _offerRetryCounts.remove(peerId);
+    final service = _peerServices.remove(peerId);
+    final renderer = _remoteRenderers.remove(peerId);
+    _knownPeers.remove(peerId);
+    _pendingPeers.remove(peerId);
+    _peerNames.remove(peerId);
+    _pendingOffers.remove(peerId);
+    _pendingAnswers.remove(peerId);
+    _pendingCandidates.remove(peerId);
+    if (service != null) {
+      await service.dispose();
+    }
+    if (renderer != null) {
+      await renderer.dispose();
+    }
+    if (mounted) setState(() {});
+  }
+
+  Set<String> _extractPeers(Map<String, dynamic> m) {
+    final peers = <String>{};
+    final raw = m['peers'] as List?;
+    if (raw == null) return peers;
+    for (final item in raw) {
+      if (item is String) {
+        final id = item.trim();
+        if (id.isNotEmpty && id != widget.name) {
+          peers.add(id);
+          _peerNames.putIfAbsent(id, () => id);
+        }
+        continue;
+      }
+      if (item is Map) {
+        final peerId = (item['peerId'] as String? ?? '').trim();
+        final name = (item['name'] as String? ?? '').trim();
+        if (peerId.isEmpty) continue;
+        if (name.isNotEmpty) {
+          _peerNames[peerId] = name;
+        }
+        if (peerId != _selfPeerId) {
+          peers.add(peerId);
+        }
+      }
+    }
+    return peers;
+  }
+
+  Future<void> _reconcilePeers(Set<String> peers) async {
+    final toRemove = _remoteRenderers.keys
+        .where((peerId) => !peers.contains(peerId))
+        .toList();
+    for (final peerId in toRemove) {
+      await _removePeerConnection(peerId);
+    }
+    _knownPeers
+      ..clear()
+      ..addAll(peers);
+    _pendingPeers.removeWhere((peerId) => !peers.contains(peerId));
+    for (final peerId in peers) {
+      await _ensurePeerConnection(
+        peerId,
+        initiateOffer: _shouldInitiateOfferForPeer(peerId),
+      );
+    }
+  }
+
+  Future<void> _drainPendingPeers() async {
+    if (_localStream == null) return;
+    final peers = {..._knownPeers, ..._pendingPeers};
+    if (peers.isEmpty) return;
+    for (final peerId in peers) {
+      await _ensurePeerConnection(
+        peerId,
+        initiateOffer: _shouldInitiateOfferForPeer(peerId),
+      );
+    }
+  }
+
   Future<void> _initializeVideo() async {
     if (_videoInitialized) return;
     _rtcLog('initializeVideo start');
@@ -217,148 +513,26 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         return;
       }
     }
-    if (widget.isHost) {
-      _rtcLog('init role=host');
-      _videoService = VideoService(
-        peerId: widget.name,
-        logger: _rtcLog,
-        onRemoteStreamAdded: (stream) {
-          _rtcLog('remote stream added (host)');
-          _remoteRenderer.srcObject = stream;
-          if (mounted) setState(() {});
-        },
-        onIceCandidate: (candidate, sdpMLineIndex, sdpMid) {
-          if (_signaling != null) {
-            _rtcLog('send ice -> ${_remotePeerId ?? '(room)'}');
-            _signaling!.send({
-              'type': 'ice-candidate',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'candidate': candidate,
-              'sdpMLineIndex': sdpMLineIndex,
-              'sdpMid': sdpMid,
-            });
-          }
-        },
-        onOfferCreated: (sdp) {
-          if (_signaling != null) {
-            _rtcLog('send offer -> ${_remotePeerId ?? '(room)'} (len=${sdp.length})');
-            _signaling!.send({
-              'type': 'video-offer',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'sdp': sdp,
-            });
-          }
-        },
-        onAnswerCreated: (sdp) {
-          if (_signaling != null) {
-            _rtcLog('send answer -> ${_remotePeerId ?? '(room)'} (len=${sdp.length})');
-            _signaling!.send({
-              'type': 'video-answer',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'sdp': sdp,
-            });
-          }
-        },
-      );
-      try {
-        await _videoService!.initialize();
-        await _localRenderer.initialize();
-        await _remoteRenderer.initialize();
-        _localRenderer.srcObject = _videoService!.localStream;
-        if (mounted) {
-          setState(() {
-            _videoInitialized = true;
-            _showVideo = true;
-          });
-        }
-        _rtcLog('host local video initialized');
-      } catch (e) {
-        _rtcLog('host initialize error: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('视频初始化失败：$e')),
-          );
-        }
+    try {
+      await _localRenderer.initialize();
+      _localStream = await VideoService.createLocalMediaStream();
+      _localRenderer.srcObject = _localStream;
+      await _setLocalAudioEnabled(_audioEnabled);
+      await _setLocalVideoEnabled(_videoEnabled);
+      if (mounted) {
+        setState(() {
+          _videoInitialized = true;
+          _showVideo = true;
+        });
       }
-    } else {
-      _rtcLog('init role=guest');
-      _videoService = VideoService(
-        peerId: widget.name,
-        logger: _rtcLog,
-        onRemoteStreamAdded: (stream) {
-          _rtcLog('remote stream added (guest)');
-          _remoteRenderer.srcObject = stream;
-          if (mounted) setState(() {});
-        },
-        onIceCandidate: (candidate, sdpMLineIndex, sdpMid) {
-          if (_signaling != null) {
-            _rtcLog('send ice -> ${_remotePeerId ?? '(room)'}');
-            _signaling!.send({
-              'type': 'ice-candidate',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'candidate': candidate,
-              'sdpMLineIndex': sdpMLineIndex,
-              'sdpMid': sdpMid,
-            });
-          }
-        },
-        onOfferCreated: (sdp) {
-          if (_signaling != null) {
-            _rtcLog('send offer -> ${_remotePeerId ?? '(room)'} (len=${sdp.length})');
-            _signaling!.send({
-              'type': 'video-offer',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'sdp': sdp,
-            });
-          }
-        },
-        onAnswerCreated: (sdp) {
-          if (_signaling != null) {
-            _rtcLog('send answer -> ${_remotePeerId ?? '(room)'} (len=${sdp.length})');
-            _signaling!.send({
-              'type': 'video-answer',
-              'from': widget.name,
-              'room': widget.roomId,
-              'to': _remotePeerId,
-              'sdp': sdp,
-            });
-          }
-        },
-      );
-      try {
-        await _videoService!.initialize();
-        await _localRenderer.initialize();
-        await _remoteRenderer.initialize();
-        _localRenderer.srcObject = _videoService!.localStream;
-        if (mounted) {
-          setState(() => _videoInitialized = true);
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) setState(() => _showVideo = true);
-          });
-          WidgetsBinding.instance.addPostFrameCallback((_) async {
-            if (mounted && _videoService != null) {
-              _rtcLog('guest createOffer (post frame)');
-              await _videoService!.createOffer();
-            }
-          });
-        }
-      } catch (e) {
-        _rtcLog('guest initialize error: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('视频初始化失败：$e')),
-          );
-        }
+      _rtcLog('local media initialized');
+      await _drainPendingPeers();
+    } catch (e) {
+      _rtcLog('initializeVideo error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('视频初始化失败：$e')),
+        );
       }
     }
   }
@@ -371,22 +545,19 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       _rtcLog('signaling connected');
     } catch (e) {
       _rtcLog('signaling connect failed: $e');
-      if (mounted) {
-        await showDialog(
-          context: context,
-          builder: (_) =>
-              AlertDialog(content: const Text('无法连接到房主，房间不存在或主机不可达。')),
-        );
-        Navigator.of(context).pop();
-      }
+      if (!mounted) return;
+      await showDialog(
+        context: context,
+        builder: (_) =>
+            AlertDialog(content: const Text('无法连接到房主，房间不存在或主机不可达。')),
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop();
       return;
     }
 
     _signaling!.joinRoom(widget.roomId, widget.isHost);
     _rtcLog('joinRoom sent: role=${widget.isHost ? 'host' : 'guest'}');
-    // announce presence so peers can learn our name
-    _signaling!.send({'type': 'announce', 'name': widget.name, 'isHost': widget.isHost});
-    _rtcLog('announce sent');
     _signalingSub = _signaling!.messages.listen((m) async {
       final type = m['type'] as String? ?? '';
       _rtcLog('recv type=$type');
@@ -425,134 +596,146 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       } else if (type == 'room-state') {
         final count = (m['onlineCount'] as num?)?.toInt() ?? 1;
         _updateOnlineCount(count);
+        final peers = _extractPeers(m);
+        if (peers.isNotEmpty || _knownPeers.isNotEmpty || _remoteRenderers.isNotEmpty) {
+          await _reconcilePeers(peers);
+        }
+      } else if (type == 'self-peer-id') {
+        final id = (m['peerId'] as String? ?? '').trim();
+        if (id.isNotEmpty) {
+          _selfPeerId = id;
+          _peerNames[id] = widget.name;
+          _rtcLog('self peer id assigned: $id');
+          await _drainPendingPeers();
+          await _kickstartMeshHandshake();
+        }
+      } else if (type == 'room-peers') {
+        final peers = _extractPeers(m);
+        await _reconcilePeers(peers);
       } else if (type == 'peer-joined') {
         final name = (m['name'] as String?)?.trim() ?? '';
+        final peerId = (m['peerId'] as String?)?.trim() ?? '';
         final count = (m['onlineCount'] as num?)?.toInt() ?? _onlineCount;
         _updateOnlineCount(count);
+        final peers = _extractPeers(m);
+        if (peers.isNotEmpty) {
+          await _reconcilePeers(peers);
+        }
         if (name.isNotEmpty && name != widget.name) {
           _appendSystemMessage('$name 进入了房间');
         }
+        if (peerId.isNotEmpty && peerId != _selfPeerId) {
+          if (name.isNotEmpty) _peerNames[peerId] = name;
+          _knownPeers.add(peerId);
+          await _ensurePeerConnection(
+            peerId,
+            initiateOffer: _shouldInitiateOfferForPeer(peerId),
+          );
+        }
       } else if (type == 'peer-left') {
+        final name = (m['name'] as String?)?.trim() ?? '';
         final count = (m['onlineCount'] as num?)?.toInt() ?? (_onlineCount - 1);
         _updateOnlineCount(count);
-      } else if (type == 'announce') {
-        final name = (m['name'] as String?)?.trim() ?? '';
-        if (name.isEmpty) return;
-        _rtcLog('announce from=$name');
-        if (_remotePeerId == null && name != widget.name) {
-          _remotePeerId = name;
-          _rtcLog('set remotePeerId=$_remotePeerId');
-          // Reply with own identity so both ends have peer id even with out-of-order joins.
-          _signaling?.send({
-            'type': 'announce',
-            'name': widget.name,
-            'isHost': widget.isHost,
-          });
-          _rtcLog('announce reply sent');
-          // if we're a guest and video is initialized, initiate offer
-          if (!widget.isHost && _videoInitialized && _videoService != null) {
-            _rtcLog('guest createOffer after announce');
-            await _videoService!.createOffer();
-          }
+        final peers = _extractPeers(m);
+        if (peers.isNotEmpty) {
+          await _reconcilePeers(peers);
+        }
+        final peerId = (m['peerId'] as String?)?.trim() ?? '';
+        if (peerId.isNotEmpty) {
+          await _removePeerConnection(peerId);
+        }
+        if (name.isNotEmpty && name != widget.name) {
+          _appendSystemMessage('$name 离开了房间');
         }
       } else if (type == 'video-offer') {
-        final from = (m['from'] as String? ?? '').trim();
+        final from = _messagePeerId(m, keyPrefix: 'from');
+        final to = _messagePeerId(m, keyPrefix: 'to');
+        final fromName = (m['from'] as String? ?? '').trim();
         final sdp = m['sdp'] as String? ?? '';
+        if (to.isNotEmpty && to != _selfPeerId) return;
         if (from.isEmpty || sdp.isEmpty) return;
+        if (fromName.isNotEmpty) _peerNames[from] = fromName;
         _rtcLog('video-offer from=$from len=${sdp.length}');
-        if (_remotePeerId == null) _remotePeerId = from;
-        if (_videoService == null) {
-          _videoService = VideoService(
-            peerId: widget.name,
-            logger: _rtcLog,
-            onRemoteStreamAdded: (stream) {
-              _rtcLog('remote stream added (offer path)');
-              _remoteRenderer.srcObject = stream;
-              if (mounted) setState(() {});
-            },
-            onIceCandidate: (candidate, sdpMLineIndex, sdpMid) {
-              if (_signaling != null) {
-                _rtcLog('send ice (offer path) -> $from');
-                _signaling!.send({
-                  'type': 'ice-candidate',
-                  'from': widget.name,
-                  'room': widget.roomId,
-                  'to': from,
-                  'candidate': candidate,
-                  'sdpMLineIndex': sdpMLineIndex,
-                  'sdpMid': sdpMid,
-                });
-              }
-            },
-            onOfferCreated: (sdp) {
-              _rtcLog('send offer (offer path) -> $from len=${sdp.length}');
-              if (_signaling != null) {
-                _signaling!.send({
-                  'type': 'video-offer',
-                  'from': widget.name,
-                  'room': widget.roomId,
-                  'to': from,
-                  'sdp': sdp,
-                });
-              }
-            },
-            onAnswerCreated: (sdp) {
-              _rtcLog('send answer (offer path) -> $from len=${sdp.length}');
-              if (_signaling != null) {
-                _signaling!.send({
-                  'type': 'video-answer',
-                  'from': widget.name,
-                  'room': widget.roomId,
-                  'to': from,
-                  'sdp': sdp,
-                });
-              }
-            },
-          );
-          try {
-            await _videoService!.initialize();
-            await _localRenderer.initialize();
-            await _remoteRenderer.initialize();
-            _localRenderer.srcObject = _videoService!.localStream;
-            if (mounted) setState(() => _videoInitialized = true);
-          } catch (_) {}
-        }
-        _rtcLog('setRemoteOffer begin');
-        try {
-          await _videoService!.setRemoteOffer(sdp);
-          _rtcLog('setRemoteOffer done');
-        } catch (e) {
-          _rtcLog('setRemoteOffer failed: $e');
+        _knownPeers.add(from);
+        await _ensurePeerConnection(from, initiateOffer: false);
+        final service = _peerServices[from];
+        if (service == null) {
+          _pendingOffers[from] = sdp;
           return;
         }
-        if (mounted) setState(() => _showVideo = true);
-      } else if (type == 'video-answer') {
-        final sdp = m['sdp'] as String? ?? '';
-        if (sdp.isEmpty) return;
-        _rtcLog('video-answer len=${sdp.length}');
         try {
-          await _videoService?.setRemoteAnswer(sdp);
+          await service.setRemoteOffer(sdp);
+        } catch (e) {
+          _rtcLog('setRemoteOffer failed: $e');
+          _pendingOffers[from] = sdp;
+          return;
+        }
+      } else if (type == 'video-answer') {
+        final from = _messagePeerId(m, keyPrefix: 'from');
+        final to = _messagePeerId(m, keyPrefix: 'to');
+        final fromName = (m['from'] as String? ?? '').trim();
+        final sdp = m['sdp'] as String? ?? '';
+        if (to.isNotEmpty && to != _selfPeerId) return;
+        if (sdp.isEmpty) return;
+        if (from.isEmpty) return;
+        if (fromName.isNotEmpty) _peerNames[from] = fromName;
+        _knownPeers.add(from);
+        await _ensurePeerConnection(from, initiateOffer: false);
+        final service = _peerServices[from];
+        if (service == null) {
+          _pendingAnswers[from] = sdp;
+          return;
+        }
+        _rtcLog('video-answer from=$from len=${sdp.length}');
+        try {
+          await service.setRemoteAnswer(sdp);
         } catch (e) {
           _rtcLog('setRemoteAnswer failed: $e');
+          _pendingAnswers[from] = sdp;
         }
       } else if (type == 'ice-candidate') {
+        final from = _messagePeerId(m, keyPrefix: 'from');
+        final to = _messagePeerId(m, keyPrefix: 'to');
+        final fromName = (m['from'] as String? ?? '').trim();
         final candidate = (m['candidate'] as String? ?? '').trim();
         final sdpMLineIndex = (m['sdpMLineIndex'] as num?)?.toInt() ?? 0;
         final sdpMid = (m['sdpMid'] as String? ?? '').trim();
+        if (to.isNotEmpty && to != _selfPeerId) return;
+        if (from.isEmpty) return;
         if (candidate.isEmpty) return;
+        if (fromName.isNotEmpty) _peerNames[from] = fromName;
+        _knownPeers.add(from);
+        await _ensurePeerConnection(from, initiateOffer: false);
+        final service = _peerServices[from];
+        if (service == null) {
+          _pendingCandidates.putIfAbsent(from, () => []).add({
+            'candidate': candidate,
+            'sdpMLineIndex': sdpMLineIndex,
+            'sdpMid': sdpMid,
+          });
+          return;
+        }
         _rtcLog('ice-candidate recv mLine=$sdpMLineIndex mid=$sdpMid');
-        await _videoService?.addIceCandidate(candidate, sdpMLineIndex, sdpMid);
+        try {
+          await service.addIceCandidate(candidate, sdpMLineIndex, sdpMid);
+        } catch (_) {
+          _pendingCandidates.putIfAbsent(from, () => []).add({
+            'candidate': candidate,
+            'sdpMLineIndex': sdpMLineIndex,
+            'sdpMid': sdpMid,
+          });
+        }
       } else if (type == 'error') {
         final msg = m['message'] as String? ?? '';
         _rtcLog('error msg=$msg detail=${m['detail']}');
         if (msg == 'room-not-found' && !widget.isHost) {
-          if (mounted) {
-            await showDialog(
-              context: context,
-              builder: (_) => AlertDialog(content: const Text('房间不存在。')),
-            );
-            Navigator.of(context).pop();
-          }
+          if (!mounted) return;
+          await showDialog(
+            context: context,
+            builder: (_) => AlertDialog(content: const Text('房间不存在。')),
+          );
+          if (!mounted) return;
+          Navigator.of(context).pop();
         }
       }
     });
@@ -562,10 +745,23 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   @override
   void dispose() {
     _rtcLog('dispose');
+    _signaling?.leaveRoom(widget.roomId);
     _signalingSub?.cancel();
-    _videoService?.dispose();
+    for (final timer in _offerRetryTimers.values) {
+      timer.cancel();
+    }
+    for (final service in _peerServices.values) {
+      service.dispose();
+    }
+    for (final renderer in _remoteRenderers.values) {
+      renderer.dispose();
+    }
+    if (_localStream != null) {
+      for (final track in _localStream!.getTracks()) {
+        track.stop();
+      }
+    }
     _localRenderer.dispose();
-    _remoteRenderer.dispose();
     _cache.saveRoomMessages(widget.roomId, _messages);
     _signaling?.dispose();
     _textCtrl.dispose();
@@ -759,6 +955,84 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
   }
 
+  Widget _buildVideoGrid() {
+    final tiles = <Widget>[];
+    tiles.add(
+      _buildVideoTile(
+        title: '${widget.name} (我)',
+        child: _localRenderer.srcObject != null
+            ? RTCVideoView(
+                _localRenderer,
+                mirror: true,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              )
+            : const Center(child: CircularProgressIndicator()),
+      ),
+    );
+    final peers = _remoteRenderers.keys.toList()..sort();
+    for (final peerId in peers) {
+      final renderer = _remoteRenderers[peerId]!;
+      tiles.add(
+        _buildVideoTile(
+          title: _peerLabel(peerId),
+          child: renderer.srcObject != null
+              ? RTCVideoView(
+                  renderer,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                )
+              : const Center(
+                  child: Text(
+                    '等待视频...',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ),
+        ),
+      );
+    }
+
+    int crossAxisCount;
+    if (tiles.length <= 2) {
+      crossAxisCount = 2;
+    } else if (tiles.length <= 4) {
+      crossAxisCount = 2;
+    } else {
+      crossAxisCount = 3;
+    }
+
+    return GridView.count(
+      crossAxisCount: crossAxisCount,
+      crossAxisSpacing: 1,
+      mainAxisSpacing: 1,
+      children: tiles,
+    );
+  }
+
+  Widget _buildVideoTile({required String title, required Widget child}) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(color: Colors.black54, child: child),
+        Positioned(
+          left: 8,
+          top: 8,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.black45,
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Text(
+                title,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Future<void> _confirmEndMeeting() async {
     if (!widget.isHost) return;
 
@@ -799,34 +1073,22 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         actions: [
           if (_videoInitialized)
             Tooltip(
-              message: _videoService?.audioEnabled == true ? '关闭音频' : '开启音频',
+              message: _audioEnabled ? '关闭音频' : '开启音频',
               child: IconButton(
                 onPressed: () async {
-                  if (_videoService != null) {
-                    final enabled = !(_videoService!.audioEnabled == true);
-                    await _videoService!.setAudioEnabled(enabled);
-                    if (mounted) setState(() {});
-                  }
+                  await _setLocalAudioEnabled(!_audioEnabled);
                 },
-                icon: Icon(_videoService?.audioEnabled == true
-                    ? Icons.mic
-                    : Icons.mic_off),
+                icon: Icon(_audioEnabled ? Icons.mic : Icons.mic_off),
               ),
             ),
           if (_videoInitialized)
             Tooltip(
-              message: _videoService?.videoEnabled == true ? '关闭视频' : '开启视频',
+              message: _videoEnabled ? '关闭视频' : '开启视频',
               child: IconButton(
                 onPressed: () async {
-                  if (_videoService != null) {
-                    final enabled = !(_videoService!.videoEnabled == true);
-                    await _videoService!.setVideoEnabled(enabled);
-                    if (mounted) setState(() {});
-                  }
+                  await _setLocalVideoEnabled(!_videoEnabled);
                 },
-                icon: Icon(_videoService?.videoEnabled == true
-                    ? Icons.videocam
-                    : Icons.videocam_off),
+                icon: Icon(_videoEnabled ? Icons.videocam : Icons.videocam_off),
               ),
             ),
           if (_videoInitialized)
@@ -855,40 +1117,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             Container(
               height: 240,
               color: Colors.black87,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _localRenderer.srcObject != null
-                        ? RTCVideoView(
-                            _localRenderer,
-                            mirror: true,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
-                          )
-                        : const Center(
-                            child: CircularProgressIndicator(),
-                          ),
-                  ),
-                  const SizedBox(width: 1),
-                  Expanded(
-                    child: _remoteRenderer.srcObject != null
-                        ? RTCVideoView(
-                            _remoteRenderer,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
-                          )
-                        : Container(
-                            color: Colors.black54,
-                            child: const Center(
-                              child: Text(
-                                '等待远程视频...',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                            ),
-                          ),
-                  ),
-                ],
-              ),
+              child: _buildVideoGrid(),
             ),
           Expanded(
             child: ListView.builder(

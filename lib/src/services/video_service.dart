@@ -5,14 +5,16 @@ class VideoService {
   final String peerId;
   final Function(MediaStream stream) onRemoteStreamAdded;
   final Function(String candidate, int sdpMLineIndex, String sdpMid)
-      onIceCandidate;
+  onIceCandidate;
   final Function(String sdp) onOfferCreated;
   final Function(String sdp) onAnswerCreated;
   final void Function(String message)? logger;
+  final MediaStream? sharedLocalStream;
 
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
+  bool _ownsLocalStream = false;
 
   bool _audioEnabled = true;
   bool _videoEnabled = true;
@@ -23,6 +25,7 @@ class VideoService {
     required this.onIceCandidate,
     required this.onOfferCreated,
     required this.onAnswerCreated,
+    this.sharedLocalStream,
     this.logger,
   });
 
@@ -47,21 +50,28 @@ class VideoService {
     _log('initialize done');
   }
 
-  Future<void> _setupLocalStream() async {
-    _log('requesting local media');
-    final stream = await navigator.mediaDevices.getUserMedia({
+  static Future<MediaStream> createLocalMediaStream() async {
+    return navigator.mediaDevices.getUserMedia({
       'audio': true,
       'video': {
-        'mandatory': {
-          'minWidth': 640,
-          'minHeight': 480,
-          'minFrameRate': 15,
-        },
+        'mandatory': {'minWidth': 640, 'minHeight': 480, 'minFrameRate': 15},
         'facingMode': 'user',
         'optional': [],
       },
     });
+  }
+
+  Future<void> _setupLocalStream() async {
+    if (sharedLocalStream != null) {
+      _localStream = sharedLocalStream;
+      _ownsLocalStream = false;
+      _log('using shared local stream');
+      return;
+    }
+    _log('requesting local media');
+    final stream = await createLocalMediaStream();
     _localStream = stream;
+    _ownsLocalStream = true;
     _log(
       'local stream ready: audio=${stream.getAudioTracks().length}, video=${stream.getVideoTracks().length}',
     );
@@ -142,7 +152,9 @@ class VideoService {
   Future<void> setRemoteOffer(String sdp) async {
     if (_peerConnection == null) return;
     final normalized = _normalizeSdp(sdp);
-    _log('setRemoteOffer start, sdpLen=${sdp.length}, normalizedLen=${normalized.length}');
+    _log(
+      'setRemoteOffer start, sdpLen=${sdp.length}, normalizedLen=${normalized.length}',
+    );
     final offer = RTCSessionDescription(normalized, 'offer');
     await _peerConnection!.setRemoteDescription(offer);
     final answer = await _peerConnection!.createAnswer();
@@ -154,7 +166,9 @@ class VideoService {
   Future<void> setRemoteAnswer(String sdp) async {
     if (_peerConnection == null) return;
     final normalized = _normalizeSdp(sdp);
-    _log('setRemoteAnswer start, sdpLen=${sdp.length}, normalizedLen=${normalized.length}');
+    _log(
+      'setRemoteAnswer start, sdpLen=${sdp.length}, normalizedLen=${normalized.length}',
+    );
     final answer = RTCSessionDescription(normalized, 'answer');
     await _peerConnection!.setRemoteDescription(answer);
     _log('setRemoteAnswer done');
@@ -198,7 +212,7 @@ class VideoService {
 
   Future<void> dispose() async {
     _log('dispose start');
-    if (_localStream != null) {
+    if (_localStream != null && _ownsLocalStream) {
       for (var track in _localStream!.getTracks()) {
         await track.stop();
       }

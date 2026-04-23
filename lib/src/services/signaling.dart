@@ -40,6 +40,10 @@ class SignalingService {
     send({'type': isHost ? 'create' : 'join', 'name': name, 'room': roomId});
   }
 
+  void leaveRoom(String roomId) {
+    send({'type': 'leave', 'name': name, 'room': roomId});
+  }
+
   // Video signaling methods
   void sendVideoOffer(String peerId, String sdp) {
     send({
