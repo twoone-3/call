@@ -78,7 +78,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   bool _showVideo = false;
   bool _videoInitialized = false;
   int _onlineCount = 1;
+  bool _meetingEndedHandled = false;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+  String? _expandedPeerId; // null means local, 'none' means grid, else peerId
 
   String get _rtcTag =>
       '${widget.isHost ? 'host' : 'guest'}:${widget.name}/${widget.roomId}';
@@ -225,6 +227,30 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         _rtcLog('kickstart offer failed peer=$peerId error=$e');
       }
     }
+  }
+
+  Future<void> _handleMeetingEnded(String message) async {
+    if (_meetingEndedHandled) return;
+    _meetingEndedHandled = true;
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('会议已结束'),
+        content: Text(message.isEmpty ? '房主已结束会议' : message),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('退出'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    Navigator.of(context).pop();
   }
 
   String _peerLabel(String peerId) {
@@ -491,7 +517,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _rtcLog('initializeVideo start');
     // Request runtime permissions on mobile
     if (Platform.isAndroid || Platform.isIOS) {
-      final statuses = await [Permission.camera, Permission.microphone].request();
+      final statuses = await [
+        Permission.camera,
+        Permission.microphone,
+      ].request();
       final cam = statuses[Permission.camera];
       final mic = statuses[Permission.microphone];
       _rtcLog(
@@ -505,7 +534,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
               title: const Text('需要权限'),
               content: const Text('请授予相机和麦克风权限以使用视频通话功能。'),
               actions: [
-                TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('知道了')),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('知道了'),
+                ),
               ],
             ),
           );
@@ -530,9 +562,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     } catch (e) {
       _rtcLog('initializeVideo error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('视频初始化失败：$e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('视频初始化失败：$e')));
       }
     }
   }
@@ -597,7 +629,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         final count = (m['onlineCount'] as num?)?.toInt() ?? 1;
         _updateOnlineCount(count);
         final peers = _extractPeers(m);
-        if (peers.isNotEmpty || _knownPeers.isNotEmpty || _remoteRenderers.isNotEmpty) {
+        if (peers.isNotEmpty ||
+            _knownPeers.isNotEmpty ||
+            _remoteRenderers.isNotEmpty) {
           await _reconcilePeers(peers);
         }
       } else if (type == 'self-peer-id') {
@@ -737,6 +771,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
           if (!mounted) return;
           Navigator.of(context).pop();
         }
+      } else if (type == 'room-ended') {
+        final message = (m['message'] as String? ?? '房主已结束会议').trim();
+        await _handleMeetingEnded(message);
       }
     });
     await _initializeVideo();
@@ -843,7 +880,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final isMine = message.isMine;
     final bubbleColor = isMine
         ? Theme.of(context).colorScheme.primaryContainer
-        : Theme.of(context).colorScheme.surfaceContainerHighest;
+        : Theme.of(context).colorScheme.surface; // 气泡颜色改为 surface 以在灰色背景上突出
     final avatarColor = _avatarColor(message.from);
 
     final avatar = CircleAvatar(
@@ -870,9 +907,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             crossAxisAlignment: isMine
                 ? CrossAxisAlignment.end
                 : CrossAxisAlignment.start,
-            children: [
-              Text(message.text),
-            ],
+            children: [Text(message.text)],
           ),
         ),
       ),
@@ -903,10 +938,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              text,
-              style: Theme.of(context).textTheme.labelMedium,
-            ),
+            child: Text(text, style: Theme.of(context).textTheme.labelMedium),
           ),
         ),
       ),
@@ -956,54 +988,114 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   }
 
   Widget _buildVideoGrid() {
-    final tiles = <Widget>[];
-    tiles.add(
-      _buildVideoTile(
-        title: '${widget.name} (我)',
-        child: _localRenderer.srcObject != null
-            ? RTCVideoView(
-                _localRenderer,
-                mirror: true,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-              )
-            : const Center(child: CircularProgressIndicator()),
-      ),
-    );
     final peers = _remoteRenderers.keys.toList()..sort();
-    for (final peerId in peers) {
-      final renderer = _remoteRenderers[peerId]!;
-      tiles.add(
-        _buildVideoTile(
-          title: _peerLabel(peerId),
-          child: renderer.srcObject != null
-              ? RTCVideoView(
-                  renderer,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                )
-              : const Center(
-                  child: Text(
-                    '等待视频...',
-                    style: TextStyle(color: Colors.white70),
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      scrollDirection: Axis.horizontal,
+      itemCount: 1 + peers.length,
+      itemBuilder: (context, index) {
+        final isLocal = index == 0;
+        final peerId = isLocal ? null : peers[index - 1];
+        final title = isLocal ? '${widget.name} (我)' : _peerLabel(peerId!);
+        final renderer = isLocal ? _localRenderer : _remoteRenderers[peerId];
+
+        return GestureDetector(
+          onTap: () {
+            setState(() {
+              if (_expandedPeerId == (peerId ?? 'local')) {
+                _expandedPeerId = null; // Collapse if clicking same
+              } else {
+                _expandedPeerId = peerId ?? 'local';
+              }
+            });
+          },
+          child: Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: AspectRatio(
+              aspectRatio: 1,
+              child: _buildVideoTile(
+                title: title,
+                child: renderer?.srcObject != null
+                    ? RTCVideoView(
+                        renderer!,
+                        mirror: isLocal,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      )
+                    : Center(
+                        child: isLocal
+                            ? const CircularProgressIndicator(strokeWidth: 2)
+                            : const Text(
+                                '等待视频...',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 10,
+                                ),
+                              ),
+                      ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildExpandedVideo() {
+    final isLocal = _expandedPeerId == 'local';
+    final peerId = isLocal ? null : _expandedPeerId;
+    final renderer = isLocal ? _localRenderer : _remoteRenderers[peerId];
+    final title = isLocal ? '${widget.name} (我)' : _peerLabel(peerId!);
+
+    return GestureDetector(
+      onTap: () => setState(() => _expandedPeerId = null),
+      child: Container(
+        color: Colors.black,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (renderer?.srcObject != null)
+              RTCVideoView(
+                renderer!,
+                mirror: isLocal,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              )
+            else
+              const Center(child: CircularProgressIndicator()),
+            Positioned(
+              left: 16,
+              top: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
+              ),
+            ),
+            const Positioned(
+              right: 16,
+              top: 16,
+              child: Icon(
+                Icons.fullscreen_exit,
+                color: Colors.white70,
+                size: 30,
+              ),
+            ),
+          ],
         ),
-      );
-    }
-
-    int crossAxisCount;
-    if (tiles.length <= 2) {
-      crossAxisCount = 2;
-    } else if (tiles.length <= 4) {
-      crossAxisCount = 2;
-    } else {
-      crossAxisCount = 3;
-    }
-
-    return GridView.count(
-      crossAxisCount: crossAxisCount,
-      crossAxisSpacing: 1,
-      mainAxisSpacing: 1,
-      children: tiles,
+      ),
     );
   }
 
@@ -1011,7 +1103,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
-        ColoredBox(color: Colors.black54, child: child),
+        Positioned.fill(child: child),
         Positioned(
           left: 8,
           top: 8,
@@ -1069,6 +1161,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     return Scaffold(
       appBar: AppBar(
+        elevation: 0,
+        scrolledUnderElevation: 0,
         title: Text('${widget.roomName}（$_onlineCount）'),
         actions: [
           if (_videoInitialized)
@@ -1098,9 +1192,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 onPressed: () {
                   setState(() => _showVideo = !_showVideo);
                 },
-                icon: Icon(_showVideo
-                    ? Icons.close
-                    : Icons.videocam_outlined),
+                icon: Icon(_showVideo ? Icons.close : Icons.videocam_outlined),
               ),
             ),
           if (widget.isHost)
@@ -1113,12 +1205,21 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       ),
       body: Column(
         children: [
-          if (_showVideo && _videoInitialized)
-            Container(
-              height: 240,
-              color: Colors.black87,
-              child: _buildVideoGrid(),
+          if (_showVideo && _videoInitialized) ...[
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              height: _expandedPeerId != null
+                  ? MediaQuery.of(context).size.height * 0.7
+                  : 160.0,
+              child: ColoredBox(
+                color: Colors.transparent,
+                child: _expandedPeerId != null
+                    ? _buildExpandedVideo()
+                    : _buildVideoGrid(),
+              ),
             ),
+          ],
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
@@ -1141,9 +1242,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
           _buildUnreadBanner(),
           SafeArea(
             top: false,
-            minimum: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            minimum: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Expanded(
                   child: TextField(
@@ -1155,22 +1256,33 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                     style: Theme.of(context).textTheme.bodyLarge,
                     decoration: InputDecoration(
                       hintText: '输入消息，回车发送',
+                      filled: true,
+                      fillColor: Theme.of(context).colorScheme.surface,
                       contentPadding: const EdgeInsets.symmetric(
                         horizontal: 16,
-                        vertical: 16,
+                        vertical: 14,
                       ),
                       border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide.none,
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                FilledButton.tonalIcon(
-                  onPressed: _sendChat,
-                  icon: const Icon(Icons.send_rounded),
-                  label: const Text('发送'),
+                const SizedBox(width: 12),
+                SizedBox(
+                  height: 48, // Match the typical height of the TextField
+                  width: 90, // Fixed width for symmetry
+                  child: FilledButton(
+                    onPressed: _sendChat,
+                    style: FilledButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text('发送'),
+                  ),
                 ),
               ],
             ),

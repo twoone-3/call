@@ -114,6 +114,20 @@ class RoomHostService {
     }
   }
 
+  void _broadcastRoomEnded() {
+    final roomId = _roomId;
+    if (roomId == null) return;
+    for (final client in List<io.WebSocket>.from(_clients)) {
+      try {
+        client.add(jsonEncode({
+          'type': 'room-ended',
+          'room': roomId,
+          'message': '会议已结束',
+        }));
+      } catch (_) {}
+    }
+  }
+
   Future<void> start({
     required String roomId,
     required String roomName,
@@ -234,6 +248,10 @@ class RoomHostService {
 
   Future<void> stop() async {
     await _discovery.stopHostAdvertiser();
+
+    _broadcastRoomEnded();
+
+    await Future<void>.delayed(const Duration(milliseconds: 120));
 
     for (final client in List<io.WebSocket>.from(_clients)) {
       try {
