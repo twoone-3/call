@@ -253,6 +253,32 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     Navigator.of(context).pop();
   }
 
+  Future<void> _handleJoinRejected(String message) async {
+    if (_meetingEndedHandled) return;
+    _meetingEndedHandled = true;
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('无法加入房间'),
+        content: Text(
+          message.isEmpty ? '房间内存在同名用户，请修改用户名后再进入。' : message,
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
   String _peerLabel(String peerId) {
     final name = (_peerNames[peerId] ?? '').trim();
     if (name.isNotEmpty) return name;
@@ -771,6 +797,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
           if (!mounted) return;
           Navigator.of(context).pop();
         }
+      } else if (type == 'join-rejected') {
+        final message = (m['message'] as String? ?? '').trim();
+        await _handleJoinRejected(message);
       } else if (type == 'room-ended') {
         final message = (m['message'] as String? ?? '房主已结束会议').trim();
         await _handleMeetingEnded(message);

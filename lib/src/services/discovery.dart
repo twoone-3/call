@@ -36,6 +36,7 @@ class DiscoveryService {
     required String roomName,
     required int wsPort,
     required String hostName,
+    required List<String> hostAddresses,
     required int Function() onlineCountProvider,
   }) async {
     await stopHostAdvertiser();
@@ -56,12 +57,19 @@ class DiscoveryService {
         final obj = jsonDecode(utf8.decode(dg.data)) as Map<String, dynamic>;
         if (obj['type'] != _probeType) return;
 
+        // 获取客户端 IP 地址
+        final clientIp = dg.address.address;
+        
+        // 选择合适的主机 IP 地址
+        String hostIp = _selectHostIp(clientIp, hostAddresses);
+
         final resp = jsonEncode({
           'type': _announceType,
           'roomId': roomId,
           'roomName': roomName,
           'wsPort': wsPort,
           'hostName': hostName,
+          'hostIp': hostIp,
           'onlineCount': onlineCountProvider(),
         });
         socket.send(utf8.encode(resp), dg.address, dg.port);
@@ -71,6 +79,34 @@ class DiscoveryService {
     });
 
     _hostSocket = socket;
+  }
+
+  String _selectHostIp(String clientIp, List<String> hostAddresses) {
+    if (hostAddresses.isEmpty) return '127.0.0.1';
+    
+    // 优先选择与客户端同一子网的地址
+    final clientOctets = clientIp.split('.');
+    if (clientOctets.length == 4) {
+      final clientSubnet = '${clientOctets[0]}.${clientOctets[1]}.${clientOctets[2]}';
+      for (final addr in hostAddresses) {
+        final addrOctets = addr.split('.');
+        if (addrOctets.length == 4) {
+          final addrSubnet = '${addrOctets[0]}.${addrOctets[1]}.${addrOctets[2]}';
+          if (addrSubnet == clientSubnet) {
+            return addr;
+          }
+        }
+      }
+    }
+    
+    // 如果没有同子网的地址，返回第一个非 127.0 的地址
+    for (final addr in hostAddresses) {
+      if (!addr.startsWith('127.')) {
+        return addr;
+      }
+    }
+    
+    return hostAddresses.first;
   }
 
   Future<void> stopHostAdvertiser() async {
@@ -129,10 +165,14 @@ class DiscoveryService {
         final hostName = (obj['hostName'] as String? ?? 'host').trim();
         if (roomId.isEmpty || port <= 0) return;
 
+        // 优先使用响应中的 hostIp，否则使用数据包来源地址
+        final hostIp = (obj['hostIp'] as String? ?? '').trim();
+        final finalHostIp = hostIp.isNotEmpty ? hostIp : dg.address.address;
+
         final room = DiscoveredRoom(
           roomId: roomId,
           roomName: roomName.isEmpty ? roomId : roomName,
-          hostIp: dg.address.address,
+          hostIp: finalHostIp,
           wsPort: port,
           hostName: hostName.isEmpty ? 'host' : hostName,
           onlineCount: (obj['onlineCount'] as num?)?.toInt() ?? 1,

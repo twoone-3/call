@@ -61,6 +61,18 @@ class RoomHostService {
     return null;
   }
 
+  bool _hasDuplicateName(String name, {required io.WebSocket except}) {
+    final normalized = name.trim();
+    if (normalized.isEmpty) return false;
+    for (final ws in _clients) {
+      if (ws == except) continue;
+      if ((_clientNames[ws] ?? '').trim() == normalized) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void _broadcastRoomState({
     String? joinedName,
     String? joinedPeerId,
@@ -146,11 +158,31 @@ class RoomHostService {
     }
 
     final server = await io.HttpServer.bind(io.InternetAddress.anyIPv4, port);
+    
+    // 获取所有网络接口的 IPv4 地址
+    final interfaceAddresses = <String>[];
+    try {
+      final interfaces = await io.NetworkInterface.list(
+        includeLoopback: false,
+        type: io.InternetAddressType.IPv4,
+      );
+      for (final ni in interfaces) {
+        for (final addr in ni.addresses) {
+          if (addr.address.isNotEmpty && !interfaceAddresses.contains(addr.address)) {
+            interfaceAddresses.add(addr.address);
+          }
+        }
+      }
+    } catch (_) {
+      // 如果获取接口失败，使用 localhost
+    }
+    
     await _discovery.startHostAdvertiser(
       roomId: roomId,
       roomName: roomName,
       wsPort: server.port,
       hostName: hostName,
+      hostAddresses: interfaceAddresses.isNotEmpty ? interfaceAddresses : ['127.0.0.1'],
       onlineCountProvider: () => onlineCount,
     );
 
@@ -167,6 +199,23 @@ class RoomHostService {
                 final type = obj['type'] as String? ?? '';
                 final name = (obj['name'] as String? ?? '').trim();
                 if (type == 'create' || type == 'join') {
+                  if (_hasDuplicateName(name, except: ws)) {
+                    try {
+                      ws.add(jsonEncode({
+                        'type': 'join-rejected',
+                        'room': roomId,
+                        'reason': 'duplicate-name',
+                        'message': '房间内已存在同名用户，请修改用户名后再进入。',
+                      }));
+                    } catch (_) {}
+                    Future<void>.delayed(const Duration(milliseconds: 50), () {
+                      try {
+                        ws.close();
+                      } catch (_) {}
+                    });
+                    return;
+                  }
+
                   if (name.isNotEmpty) {
                     _clientNames[ws] = name;
                   }

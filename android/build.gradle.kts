@@ -1,5 +1,8 @@
 allprojects {
     repositories {
+        // Use Aliyun mirror for better China network speed
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/central") }
         google()
         mavenCentral()
     }
