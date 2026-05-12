@@ -81,6 +81,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   bool _meetingEndedHandled = false;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   String? _expandedPeerId; // null means local, 'none' means grid, else peerId
+  bool _videoExpanded = false;
+  bool _useExpandedLayout = false;
+  int _videoAnimEpoch = 0;
 
   String get _rtcTag =>
       '${widget.isHost ? 'host' : 'guest'}:${widget.name}/${widget.roomId}';
@@ -909,7 +912,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final isMine = message.isMine;
     final bubbleColor = isMine
         ? Theme.of(context).colorScheme.primaryContainer
-        : Theme.of(context).colorScheme.surface; // 气泡颜色改为 surface 以在灰色背景上突出
+        : Theme.of(context).colorScheme.surface;
     final avatarColor = _avatarColor(message.from);
 
     final avatar = CircleAvatar(
@@ -926,7 +929,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
 
     final bubble = ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 320),
+      constraints: const BoxConstraints(maxWidth: 280),
       child: Card(
         color: bubbleColor,
         margin: EdgeInsets.zero,
@@ -936,22 +939,60 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             crossAxisAlignment: isMine
                 ? CrossAxisAlignment.end
                 : CrossAxisAlignment.start,
-            children: [Text(message.text)],
+            children: [
+              Text(message.text),
+            ],
           ),
         ),
       ),
     );
 
+    final nameText = Text(
+      message.from,
+      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+        fontWeight: FontWeight.w500,
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+
+    // 自己的消息：直接返回 气泡+头像（不显示名字）
+    if (isMine) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            bubble,
+            const SizedBox(width: 8),
+            avatar,
+          ],
+        ),
+      );
+    }
+
+    // 他人的消息：头像 → 名字+气泡（竖排）
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
-        mainAxisAlignment: isMine
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: isMine
-            ? [bubble, const SizedBox(width: 8), avatar]
-            : [avatar, const SizedBox(width: 8), bubble],
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          avatar,
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                nameText,
+                bubble,
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1016,6 +1057,29 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
   }
 
+  void _expandVideo(String peerId) {
+    _videoAnimEpoch++;
+    setState(() {
+      _expandedPeerId = peerId;
+      _useExpandedLayout = true;
+      _videoExpanded = true;
+    });
+  }
+
+  Future<void> _collapseExpandedVideo() async {
+    if (!_videoExpanded) return;
+    final epoch = ++_videoAnimEpoch;
+    setState(() {
+      _videoExpanded = false;
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    if (!mounted || epoch != _videoAnimEpoch) return;
+    setState(() {
+      _useExpandedLayout = false;
+      _expandedPeerId = null;
+    });
+  }
+
   Widget _buildVideoGrid() {
     final peers = _remoteRenderers.keys.toList()..sort();
 
@@ -1031,13 +1095,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
         return GestureDetector(
           onTap: () {
-            setState(() {
-              if (_expandedPeerId == (peerId ?? 'local')) {
-                _expandedPeerId = null; // Collapse if clicking same
-              } else {
-                _expandedPeerId = peerId ?? 'local';
-              }
-            });
+            final targetId = peerId ?? 'local';
+            if (_videoExpanded && _expandedPeerId == targetId) {
+              _collapseExpandedVideo();
+              return;
+            }
+            _expandVideo(targetId);
           },
           child: Padding(
             padding: const EdgeInsets.only(right: 4),
@@ -1078,7 +1141,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final title = isLocal ? '${widget.name} (我)' : _peerLabel(peerId!);
 
     return GestureDetector(
-      onTap: () => setState(() => _expandedPeerId = null),
+      onTap: _collapseExpandedVideo,
       child: Container(
         color: Colors.black,
         child: Stack(
@@ -1238,12 +1301,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             AnimatedContainer(
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOut,
-              height: _expandedPeerId != null
+              height: _videoExpanded
                   ? MediaQuery.of(context).size.height * 0.7
                   : 160.0,
               child: ColoredBox(
                 color: Colors.transparent,
-                child: _expandedPeerId != null
+                child: _useExpandedLayout && _expandedPeerId != null
                     ? _buildExpandedVideo()
                     : _buildVideoGrid(),
               ),
